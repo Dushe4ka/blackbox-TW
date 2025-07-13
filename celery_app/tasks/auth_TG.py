@@ -86,16 +86,16 @@ def send_admin_notification(text: str, keyboard=None, specific_chat_id=None):
             return
         chat_ids = [str(specific_chat_id)]
     else:
-        # Иначе отправляем в первый админский чат (для обратной совместимости)
+        # Иначе отправляем ВСЕМ админам из списка
         admin_chat_ids = get_admin_chat_ids()
         if not admin_chat_ids:
             log.warning("ADMIN_CHAT_ID не установлен. Уведомление не отправлено.")
             return
-        chat_ids = [admin_chat_ids[0]]
+        chat_ids = admin_chat_ids
     
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     
-    # Отправляем сообщение в указанный чат
+    # Отправляем сообщение во все указанные чаты
     for chat_id in chat_ids:
         payload = {
             "chat_id": chat_id,
@@ -435,3 +435,48 @@ def send_message_to_chat(chat_id: int, text: str, keyboard=None):
             log.error(f"HTTP ошибка при отправке в чат {chat_id}: {e}")
     except requests.RequestException as e:
         log.error(f"Не удалось отправить сообщение в чат {chat_id}: {e}")
+
+
+def send_message_to_all_admins(text: str, keyboard=None):
+    """Отправляет сообщение всем админам из списка."""
+    if not TELEGRAM_BOT_TOKEN:
+        log.warning("TELEGRAM_BOT_TOKEN не установлен. Сообщение не отправлено.")
+        return
+    
+    admin_chat_ids = get_admin_chat_ids()
+    if not admin_chat_ids:
+        log.warning("ADMIN_CHAT_ID не установлен. Сообщение не отправлено.")
+        return
+    
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    
+    # Отправляем сообщение всем админам
+    for chat_id in admin_chat_ids:
+        payload = {
+            "chat_id": chat_id,
+            "text": text,
+            "parse_mode": "Markdown"
+        }
+        
+        if keyboard:
+            payload["reply_markup"] = json.dumps(keyboard)
+        
+        try:
+            response = requests.post(url, data=payload, timeout=10)
+            response.raise_for_status()
+            log.info(f"Сообщение успешно отправлено всем админам (ID: {chat_id})")
+        except requests.exceptions.HTTPError as e:
+            if response.status_code == 400:
+                log.error(f"400 Bad Request при отправке в чат {chat_id}. Ответ API: {response.text}")
+                # Попробуем отправить без parse_mode
+                try:
+                    payload.pop("parse_mode", None)
+                    response2 = requests.post(url, data=payload, timeout=10)
+                    response2.raise_for_status()
+                    log.info(f"Сообщение успешно отправлено в чат {chat_id} без parse_mode")
+                except requests.exceptions.RequestException as e2:
+                    log.error(f"Не удалось отправить сообщение в чат {chat_id} даже без parse_mode: {e2}")
+            else:
+                log.error(f"HTTP ошибка при отправке в чат {chat_id}: {e}")
+        except requests.RequestException as e:
+            log.error(f"Не удалось отправить сообщение в чат {chat_id}: {e}")
