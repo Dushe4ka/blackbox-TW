@@ -93,6 +93,9 @@ class CustomStates(StatesGroup):
     analysis_weekly_category = State()
     analysis_weekly_date = State()
 
+class SourcesManageStates(StatesGroup):
+    viewing_sources = State()
+
 def clean_source_data(source: Dict[str, Any]) -> Dict[str, Any]:
     """Очистка и валидация данных источника"""
     cleaned = source.copy()
@@ -304,27 +307,81 @@ async def sources_upload_callback(callback_query: types.CallbackQuery):
 @dp.callback_query(lambda c: c.data == "sources_manage")
 async def sources_manage_callback(callback_query: types.CallbackQuery):
     sources = get_sources()
-    keyboard = InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text=f"{src.get('type','?')}: {src.get('url','')}", callback_data=f"noop_{i}"),
-             InlineKeyboardButton(text="Удалить", callback_data=f"delete_source_{src.get('url','')}")]
-            for i, src in enumerate(sources)
-        ] + [[InlineKeyboardButton(text="← Назад", callback_data="menu_sources")]]
-    )
-    await callback_query.message.edit_text(
-        "🗂 Активные источники:",
-        reply_markup=keyboard
-    )
+    keyboard = create_sources_pagination_keyboard(sources, page=0)
+    
+    total_sources = len(sources)
+    if total_sources == 0:
+        text = "🗂 Активные источники:\n\n❌ Источники не найдены"
+    else:
+        text = f"🗂 Активные источники:\n\n📊 Всего источников: {total_sources}\n📄 Страница 1"
+    
+    await callback_query.message.edit_text(text, reply_markup=keyboard)
 
 @dp.callback_query(lambda c: c.data.startswith("delete_source_"))
 async def delete_source_callback(callback_query: types.CallbackQuery):
-    url = callback_query.data.replace("delete_source_", "")
+    # Парсим URL и номер страницы из callback_data
+    parts = callback_query.data.replace("delete_source_", "").split("_")
+    if len(parts) < 2:
+        await callback_query.answer("❌ Ошибка при удалении", show_alert=True)
+        return
+    
+    # Последняя часть - номер страницы, остальное - URL
+    page = int(parts[-1])
+    url = "_".join(parts[:-1])  # Восстанавливаем URL (может содержать _)
+    
     if delete_source(url):
-        await callback_query.answer("Источник удалён", show_alert=False)
+        await callback_query.answer("✅ Источник удалён", show_alert=False)
     else:
-        await callback_query.answer("Ошибка при удалении", show_alert=True)
-    # Обновить список после удаления
-    await sources_manage_callback(callback_query)
+        await callback_query.answer("❌ Ошибка при удалении", show_alert=True)
+        return
+    
+    # Обновляем список, оставаясь на той же странице
+    try:
+        sources = get_sources()
+        total_sources = len(sources)
+        total_pages = (total_sources + 9) // 10  # 10 источников на страницу
+        
+        # Если текущая страница стала больше общего количества страниц, переходим на последнюю
+        if page >= total_pages and total_pages > 0:
+            page = total_pages - 1
+        
+        keyboard = create_sources_pagination_keyboard(sources, page=page)
+        
+        if total_sources == 0:
+            text = "🗂 Активные источники:\n\n❌ Источники не найдены"
+        else:
+            text = f"🗂 Активные источники:\n\n📊 Всего источников: {total_sources}\n📄 Страница {page+1} из {total_pages}"
+        
+        await callback_query.message.edit_text(text, reply_markup=keyboard)
+    except Exception as e:
+        # В случае ошибки возвращаемся к первой странице
+        await sources_manage_callback(callback_query)
+
+@dp.callback_query(lambda c: c.data.startswith("sources_page_"))
+async def sources_page_callback(callback_query: types.CallbackQuery):
+    """Обработчик навигации по страницам источников"""
+    try:
+        page = int(callback_query.data.replace("sources_page_", ""))
+        sources = get_sources()
+        keyboard = create_sources_pagination_keyboard(sources, page=page)
+        
+        total_sources = len(sources)
+        total_pages = (total_sources + 9) // 10  # 10 источников на страницу
+        
+        if total_sources == 0:
+            text = "🗂 Активные источники:\n\n❌ Источники не найдены"
+        else:
+            text = f"🗂 Активные источники:\n\n📊 Всего источников: {total_sources}\n📄 Страница {page+1} из {total_pages}"
+        
+        await callback_query.message.edit_text(text, reply_markup=keyboard)
+    except ValueError:
+        await callback_query.answer("❌ Ошибка при переходе на страницу")
+
+@dp.callback_query(lambda c: c.data.startswith("noop_"))
+async def noop_callback(callback_query: types.CallbackQuery):
+    """Обработчик для кнопок без действия (noop)"""
+    # Просто игнорируем нажатие
+    await callback_query.answer()
 
 @dp.callback_query(lambda c: c.data == "menu_analysis")
 async def menu_analysis_callback(callback_query: types.CallbackQuery):
@@ -904,6 +961,69 @@ def get_add_more_sources_keyboard(source_type: str):
             [InlineKeyboardButton(text="Завершить", callback_data="finish_adding_sources")],
         ]
     )
+
+def create_sources_pagination_keyboard(sources: List[Dict], page: int = 0, sources_per_page: int = 10):
+    """Создает клавиатуру с пагинацией для управления источниками"""
+    total_sources = len(sources)
+    total_pages = (total_sources + sources_per_page - 1) // sources_per_page
+    
+    if total_sources == 0:
+        return InlineKeyboardMarkup(
+            inline_keyboard=[[InlineKeyboardButton(text="← Назад", callback_data="menu_sources")]]
+        )
+    
+    # Ограничиваем страницу
+    page = max(0, min(page, total_pages - 1))
+    
+    # Получаем источники для текущей страницы
+    start_idx = page * sources_per_page
+    end_idx = min(start_idx + sources_per_page, total_sources)
+    page_sources = sources[start_idx:end_idx]
+    
+    # Создаем кнопки для источников
+    keyboard_rows = []
+    for i, src in enumerate(page_sources):
+        source_idx = start_idx + i
+        source_type = src.get('type', '?')
+        source_url = src.get('url', '')
+        # Обрезаем URL для отображения
+        display_url = source_url[:30] + "..." if len(source_url) > 30 else source_url
+        
+        keyboard_rows.append([
+            InlineKeyboardButton(
+                text=f"{source_type}: {display_url}", 
+                callback_data=f"noop_{source_idx}"
+            ),
+            InlineKeyboardButton(
+                text="❌", 
+                callback_data=f"delete_source_{source_url}_{page}"
+            )
+        ])
+    
+    # Добавляем навигационные кнопки
+    nav_buttons = []
+    
+    # Кнопка "Предыдущая страница"
+    if page > 0:
+        nav_buttons.append(InlineKeyboardButton(text="◀️", callback_data=f"sources_page_{page-1}"))
+    
+    # Информация о странице
+    nav_buttons.append(InlineKeyboardButton(
+        text=f"{page+1}/{total_pages}", 
+        callback_data="noop_page_info"
+    ))
+    
+    # Кнопка "Следующая страница"
+    if page < total_pages - 1:
+        nav_buttons.append(InlineKeyboardButton(text="▶️", callback_data=f"sources_page_{page+1}"))
+    
+    if nav_buttons:
+        keyboard_rows.append(nav_buttons)
+    
+    # Кнопка "Назад"
+    keyboard_rows.append([InlineKeyboardButton(text="← Назад", callback_data="menu_sources")])
+    
+    return InlineKeyboardMarkup(inline_keyboard=keyboard_rows)
 
 # Отладочная информация
 print(f"DEBUG: SESSION_FILE в bot.py = {SESSION_FILE}")
