@@ -43,7 +43,7 @@ from session_path import SESSION_FILE
 from celery_app.tasks.weekly_news_tasks import analyze_weekly_news_task
 from aiogram3_calendar import SimpleCalendar, simple_cal_callback
 import tempfile
-from utils import is_admin, is_admin_chat
+from utils.admin_utils import is_admin, is_admin_chat
 
 # Настройка логирования
 logging.basicConfig(
