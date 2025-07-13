@@ -21,7 +21,7 @@ from session_path import SESSION_FILE
 
 # Импортируем функции для работы с админскими чатами
 try:
-    from utils import is_admin_chat, get_admin_chat_ids
+    from utils.admin_utils import is_admin_chat, get_admin_chat_ids
 except ImportError:
     # Если utils недоступен, создаем простые функции
     def is_admin_chat(chat_id):

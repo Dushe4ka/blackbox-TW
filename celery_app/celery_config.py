@@ -35,7 +35,7 @@ beat_schedule = {
     },
     'periodic-telegram-auth-check': {
         'task': 'celery_app.tasks.auth_TG.periodic_telegram_auth_check',
-        'schedule': crontab(minute=0, hour='*'),  # Каждый час
+        'schedule': crontab(minute=0, hour='*/6'),  # Каждый час
     },
     'parse-and-vectorize-sources-every-3h': {
         'task': 'celery_app.tasks.parse_embed_data.parse_and_vectorize_sources',

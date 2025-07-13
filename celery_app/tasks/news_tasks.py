@@ -9,11 +9,19 @@ import time
 from celery import current_task
 from datetime import datetime
 from database import get_subscribed_users
+from utils.message_utils import split_analysis_message, split_digest_message, format_message_part
 
 # Загружаем переменные окружения
 load_dotenv()
 
 logger = logging.getLogger(__name__)
+
+async def send_all_messages(bot, chat_id, message_parts):
+    for i, part in enumerate(message_parts, 1):
+        await bot.send_message(chat_id=chat_id, text=part)
+        if i < len(message_parts):
+            await asyncio.sleep(0.5)
+    await bot.session.close()
 
 @app.task(bind=True, name='celery_app.tasks.news_tasks.analyze_news_task')
 def analyze_news_task(self, category: str, analysis_date: str, chat_id: int = None) -> dict:
@@ -42,35 +50,28 @@ def analyze_news_task(self, category: str, analysis_date: str, chat_id: int = No
         )
         
         if result['status'] == 'success':
-            # Формируем сообщение об успешном результате
-            result_message = (
-                f"✅ Анализ новостей за сутки завершен!\n\n"
-                f"📊 Проанализировано материалов: {result['materials_count']}\n\n"
-                f"📝 Результаты анализа:\n{result['analysis']}"
+            message_parts = split_analysis_message(
+                analysis_text=result['analysis'],
+                materials_count=result['materials_count'],
+                category=category,
+                date=analysis_date,
+                analysis_type='single_day'
             )
-            
-            # Отправляем результат пользователю
             bot = Bot(token=os.getenv("TELEGRAM_BOT_TOKEN"))
-            asyncio.run(bot.send_message(chat_id=chat_id, text=result_message))
-            asyncio.run(bot.session.close())
-            
+            asyncio.run(send_all_messages(bot, chat_id, [format_message_part(part, i+1, len(message_parts)) for i, part in enumerate(message_parts)]))
             execution_time = time.time() - start_time
             logger.info(f"=== Воркер {worker_num} (PID: {process_id}) завершил анализ новостей за {execution_time:.2f} секунд ===")
             
             return {
                 'status': 'success',
                 'chat_id': chat_id,
-                'result_message': result_message
+                'parts_count': len(message_parts),
+                'message': 'Анализ успешно выполнен и отправлен'
             }
         else:
-            # Формируем сообщение об ошибке
             error_message = f"❌ Ошибка при анализе новостей: {result['message']}"
-            
-            # Отправляем ошибку пользователю
             bot = Bot(token=os.getenv("TELEGRAM_BOT_TOKEN"))
-            asyncio.run(bot.send_message(chat_id=chat_id, text=error_message))
-            asyncio.run(bot.session.close())
-            
+            asyncio.run(send_all_messages(bot, chat_id, [error_message]))
             execution_time = time.time() - start_time
             logger.error(f"=== Воркер {worker_num} (PID: {process_id}) завершил анализ новостей с ошибкой за {execution_time:.2f} секунд ===")
             
@@ -87,8 +88,7 @@ def analyze_news_task(self, category: str, analysis_date: str, chat_id: int = No
         # Отправляем ошибку пользователю
         try:
             bot = Bot(token=os.getenv("TELEGRAM_BOT_TOKEN"))
-            asyncio.run(bot.send_message(chat_id=chat_id, text=error_message))
-            asyncio.run(bot.session.close())
+            asyncio.run(send_all_messages(bot, chat_id, [error_message]))
         except Exception as bot_error:
             logger.error(f"Ошибка при отправке сообщения пользователю: {str(bot_error)}")
         
@@ -174,27 +174,29 @@ def send_daily_news(self):
                 continue
             
             # Формируем общий дайджест
-            digest_message = (
-                f"📰 Ежедневный дайджест новостей за {current_date}\n\n"
-                f"📊 Всего проанализировано материалов: {total_materials}\n\n"
-            )
-            
+            digest_text = ""
             for result in all_results:
-                digest_message += f"📌 Категория: {result['category']}\n"
+                digest_text += f"📌 Категория: {result['category']}\n"
                 if 'error' in result:
-                    digest_message += f"❌ Ошибка: {result['error']}\n\n"
+                    digest_text += f"❌ Ошибка: {result['error']}\n\n"
                 else:
-                    digest_message += (
+                    digest_text += (
                         f"📊 Материалов: {result['materials_count']}\n"
                         f"📝 Анализ:\n{result['analysis']}\n\n"
                     )
             
-            # Отправляем дайджест пользователю
+            # Разбиваем дайджест на части, если он слишком длинный
+            message_parts = split_digest_message(
+                digest_text=digest_text,
+                date=current_date,
+                total_materials=total_materials
+            )
+            
+            # Отправляем все части дайджеста пользователю
             try:
                 bot = Bot(token=os.getenv("TELEGRAM_BOT_TOKEN"))
-                asyncio.run(bot.send_message(chat_id=chat_id, text=digest_message))
-                asyncio.run(bot.session.close())
-                logger.info(f"Дайджест успешно отправлен подписчику {chat_id}")
+                asyncio.run(send_all_messages(bot, chat_id, [format_message_part(part, i+1, len(message_parts)) for i, part in enumerate(message_parts)]))
+                logger.info(f"Дайджест успешно отправлен подписчику {chat_id} ({len(message_parts)} частей)")
             except Exception as e:
                 logger.error(f"Ошибка при отправке дайджеста подписчику {chat_id}: {str(e)}")
         

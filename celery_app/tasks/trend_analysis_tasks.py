@@ -9,11 +9,19 @@ import asyncio
 import time
 from celery import current_task
 import multiprocessing
+from utils.message_utils import split_analysis_message, format_message_part
 
 # Загружаем переменные окружения
 load_dotenv()
 
 logger = logging.getLogger(__name__)
+
+async def send_all_messages(bot, chat_id, message_parts):
+    for i, part in enumerate(message_parts, 1):
+        await bot.send_message(chat_id=chat_id, text=part)
+        if i < len(message_parts):
+            await asyncio.sleep(0.5)
+    await bot.session.close()
 
 @app.task(bind=True, name='celery_app.tasks.trend_analysis_tasks.analyze_trend_task')
 def analyze_trend_task(self, category: str, user_query: str, chat_id: int = None) -> dict:
@@ -42,17 +50,18 @@ def analyze_trend_task(self, category: str, user_query: str, chat_id: int = None
         result = analyze_trend(category, user_query)
         
         if result['status'] == 'success':
-            # Формируем сообщение об успешном результате
-            result_message = (
-                f"✅ Анализ тренда по запросу завершен!\n\n"
-                f"📊 Проанализировано материалов: {result['materials_count']}\n\n"
-                f"📝 Результаты анализа:\n{result['analysis']}"
+            # Разбиваем сообщение на части, если оно слишком длинное
+            message_parts = split_analysis_message(
+                analysis_text=result['analysis'],
+                materials_count=result['materials_count'],
+                category=category,
+                date=None,
+                analysis_type='trend_query'
             )
             
-            # Отправляем результат пользователю
+            # Отправляем все части сообщения
             bot = Bot(token=os.getenv("TELEGRAM_BOT_TOKEN"))
-            asyncio.run(bot.send_message(chat_id=chat_id, text=result_message))
-            asyncio.run(bot.session.close())
+            asyncio.run(send_all_messages(bot, chat_id, [format_message_part(part, i+1, len(message_parts)) for i, part in enumerate(message_parts)]))
             
             execution_time = time.time() - start_time
             logger.info(f"=== Воркер {worker_num} (PID: {process_id}) завершил задачу за {execution_time:.2f} секунд ===")
@@ -60,7 +69,8 @@ def analyze_trend_task(self, category: str, user_query: str, chat_id: int = None
             return {
                 'status': 'success',
                 'chat_id': chat_id,
-                'result_message': result_message
+                'parts_count': len(message_parts),
+                'message': 'Анализ тренда успешно выполнен и отправлен'
             }
         else:
             # Формируем сообщение об ошибке
@@ -68,8 +78,7 @@ def analyze_trend_task(self, category: str, user_query: str, chat_id: int = None
             
             # Отправляем ошибку пользователю
             bot = Bot(token=os.getenv("TELEGRAM_BOT_TOKEN"))
-            asyncio.run(bot.send_message(chat_id=chat_id, text=error_message))
-            asyncio.run(bot.session.close())
+            asyncio.run(send_all_messages(bot, chat_id, [error_message]))
             
             execution_time = time.time() - start_time
             logger.error(f"=== Воркер {worker_num} (PID: {process_id}) завершил задачу с ошибкой за {execution_time:.2f} секунд ===")
@@ -87,8 +96,7 @@ def analyze_trend_task(self, category: str, user_query: str, chat_id: int = None
         # Отправляем ошибку пользователю
         try:
             bot = Bot(token=os.getenv("TELEGRAM_BOT_TOKEN"))
-            asyncio.run(bot.send_message(chat_id=chat_id, text=error_message))
-            asyncio.run(bot.session.close())
+            asyncio.run(send_all_messages(bot, chat_id, [error_message]))
         except Exception as bot_error:
             logger.error(f"Ошибка при отправке сообщения пользователю: {str(bot_error)}")
         
