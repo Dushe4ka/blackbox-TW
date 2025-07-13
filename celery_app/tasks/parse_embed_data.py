@@ -13,8 +13,15 @@ load_dotenv()
 
 logger = get_task_logger(__name__)
 
-ADMIN_CHAT_ID = int(os.getenv("ADMIN_CHAT_ID"))
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+
+# Функция для получения списка админских чатов
+def get_admin_chat_ids():
+    """Возвращает список ID административных чатов."""
+    admin_chat_ids_str = os.getenv("ADMIN_CHAT_ID", "")
+    if not admin_chat_ids_str:
+        return []
+    return [admin_chat_id.strip() for admin_chat_id in admin_chat_ids_str.split(",")]
 
 def parse_all_sources_sync(sources):
     parsed_count = 0
@@ -44,28 +51,41 @@ def parse_all_sources_sync(sources):
             logger.error(f"Ошибка при парсинге {url}: {e}")
     return parsed_count, failed_sources
 
-def send_admin_notification(text: str):
+def send_admin_notification(text: str, specific_chat_id=None):
     """Отправляет сообщение админу через Telegram Bot API."""
-    if not TELEGRAM_BOT_TOKEN or not ADMIN_CHAT_ID:
-        logger.warning("TELEGRAM_BOT_TOKEN или ADMIN_CHAT_ID не установлены. Уведомление не отправлено.")
+    if not TELEGRAM_BOT_TOKEN:
+        logger.warning("TELEGRAM_BOT_TOKEN не установлен. Уведомление не отправлено.")
         return
+    
+    # Если указан конкретный chat_id, отправляем только туда
+    if specific_chat_id:
+        chat_ids = [str(specific_chat_id)]
+    else:
+        # Иначе отправляем во все админские чаты
+        chat_ids = get_admin_chat_ids()
+        if not chat_ids:
+            logger.warning("ADMIN_CHAT_ID не установлен. Уведомление не отправлено.")
+            return
     
     import requests
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-    payload = {
-        "chat_id": ADMIN_CHAT_ID,
-        "text": text,
-        "parse_mode": "Markdown" # Используем Markdown для красивого форматирования
-    }
-    try:
-        response = requests.post(url, data=payload, timeout=10)
-        response.raise_for_status() # Вызовет ошибку, если HTTP-статус не 2xx
-        logger.info(f"Уведомление успешно отправлено админу (ID: {ADMIN_CHAT_ID})")
-    except requests.RequestException as e:
-        logger.error(f"Не удалось отправить уведомление админу: {e}")
+    
+    # Отправляем сообщение в указанные чаты
+    for chat_id in chat_ids:
+        payload = {
+            "chat_id": chat_id,
+            "text": text,
+            "parse_mode": "Markdown" # Используем Markdown для красивого форматирования
+        }
+        try:
+            response = requests.post(url, data=payload, timeout=10)
+            response.raise_for_status() # Вызовет ошибку, если HTTP-статус не 2xx
+            logger.info(f"Уведомление успешно отправлено админу (ID: {chat_id})")
+        except requests.RequestException as e:
+            logger.error(f"Не удалось отправить уведомление админу {chat_id}: {e}")
 
 @app.task(bind=True, max_retries=3, name='celery_app.tasks.parse_embed_data.parse_and_vectorize_sources')
-def parse_and_vectorize_sources(self):
+def parse_and_vectorize_sources(self, chat_id=None):
     sources = get_sources()
     total_sources = len(sources)
 
@@ -96,5 +116,10 @@ def parse_and_vectorize_sources(self):
         f"• Не спарсились: {failed_sources}"
     )
 
-    # Отправляем админу
-    send_admin_notification(result_message)
+    # Отправляем результат в зависимости от типа запуска
+    if chat_id:
+        # Если указан chat_id - отправляем конкретному пользователю (принудительный запуск)
+        send_admin_notification(result_message, chat_id)
+    else:
+        # Если chat_id не указан - отправляем всем админам (периодический запуск)
+        send_admin_notification(result_message)

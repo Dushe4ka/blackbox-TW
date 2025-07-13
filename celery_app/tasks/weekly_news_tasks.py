@@ -1,5 +1,5 @@
 from celery_app import app
-from usecases.daily_news import analyze_trend
+from usecases.weekly_news import analyze_trend
 import logging
 from aiogram import Bot
 import os
@@ -7,8 +7,6 @@ from dotenv import load_dotenv
 import asyncio
 import time
 from celery import current_task
-from datetime import datetime
-from database import get_subscribed_users
 
 # Загружаем переменные окружения
 load_dotenv()
@@ -44,7 +42,7 @@ def analyze_weekly_news_task(self, category: str, analysis_start_date: str, chat
         if result['status'] == 'success':
             # Формируем сообщение об успешном результате
             result_message = (
-                f"✅ Недельный анализ новостей завершен!\n\n"
+                f"✅ Анализ новостей за неделю завершен!\n\n"
                 f"📊 Проанализировано материалов: {result['materials_count']}\n\n"
                 f"📝 Результаты анализа:\n{result['analysis']}"
             )

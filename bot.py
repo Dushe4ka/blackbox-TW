@@ -9,8 +9,7 @@ from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
-from aiogram.types import FSInputFile, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery, ReplyKeyboardMarkup, \
-    KeyboardButton
+from aiogram.types import FSInputFile, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery, ReplyKeyboardMarkup, KeyboardButton
 from dotenv import load_dotenv
 import pandas as pd
 import numpy as np
@@ -37,14 +36,14 @@ from celery_app.tasks.news_tasks import analyze_news_task
 from csv_sources_reader import process_csv as process_csv_sources
 import redis
 import json
-from telethon import TelegramClient
-from telethon.errors import SessionPasswordNeededError, PhoneCodeInvalidError, PasswordHashInvalidError
+
 from celery_app.tasks.parse_embed_data import parse_and_vectorize_sources
-from celery_app.tasks.auth_TG import periodic_telegram_auth_check
+from celery_app.tasks.auth_TG import periodic_telegram_auth_check, check_telegram_auth_status, process_auth_code
 from session_path import SESSION_FILE
 from celery_app.tasks.weekly_news_tasks import analyze_weekly_news_task
 from aiogram3_calendar import SimpleCalendar, simple_cal_callback
 import tempfile
+from utils import is_admin, is_admin_chat
 
 # Настройка логирования
 logging.basicConfig(
@@ -69,25 +68,22 @@ vector_store = VectorStore()
 text_processor = TextProcessor()
 llm_client = get_llm_client()
 
-
 # Состояния FSM
 class CSVUpload(StatesGroup):
     waiting_for_file = State()
 
-
 class SubscriptionStates(StatesGroup):
     waiting_for_category = State()
-
 
 class RSSUpload(StatesGroup):
     waiting_for_category = State()
     waiting_for_rss = State()
-
+    waiting_for_more_rss = State()
 
 class TGUpload(StatesGroup):
     waiting_for_category = State()
     waiting_for_tg = State()
-
+    waiting_for_more_tg = State()
 
 class CustomStates(StatesGroup):
     analysis_query_category = State()
@@ -97,28 +93,26 @@ class CustomStates(StatesGroup):
     analysis_weekly_category = State()
     analysis_weekly_date = State()
 
-
 def clean_source_data(source: Dict[str, Any]) -> Dict[str, Any]:
     """Очистка и валидация данных источника"""
     cleaned = source.copy()
-
+    
     # Преобразуем NaN в пустые строки
     for key in cleaned:
         if pd.isna(cleaned[key]):
             cleaned[key] = ''
         elif isinstance(cleaned[key], (float, np.float64)):
             cleaned[key] = str(cleaned[key])
-
+    
     # Объединяем описание и контент, если контент пустой
     if not cleaned.get('content') and cleaned.get('description'):
         cleaned['content'] = cleaned['description']
-
+    
     return cleaned
-
 
 def print_source_info(source: Dict[str, Any], index: int):
     """Вывод информации об источнике"""
-    logger.info(f"\n{'=' * 50}")
+    logger.info(f"\n{'='*50}")
     logger.info(f"Источник #{index + 1}:")
     logger.info(f"URL: {source.get('url', 'N/A')}")
     logger.info(f"Заголовок: {source.get('title', 'N/A')}")
@@ -126,14 +120,13 @@ def print_source_info(source: Dict[str, Any], index: int):
     logger.info(f"Категория: {source.get('category', 'N/A')}")
     logger.info(f"Дата: {source.get('date', 'N/A')}")
     logger.info(f"Тип источника: {source.get('source_type', 'N/A')}")
-
+    
     # Проверяем контент
     content = source.get('content', '')
     logger.info(f"Длина контента: {len(content) if content else 0} символов")
     if content:
         logger.info(f"Первые 200 символов контента: {content[:200]}")
-    logger.info(f"{'=' * 50}\n")
-
+    logger.info(f"{'='*50}\n")
 
 def get_main_menu_keyboard(is_admin=False):
     buttons = [
@@ -144,7 +137,6 @@ def get_main_menu_keyboard(is_admin=False):
     if is_admin:
         buttons.append([InlineKeyboardButton(text="Telegram авторизация", callback_data="tg_auth_request_menu")])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
-
 
 async def send_welcome_message(chat_id: int, is_admin=False):
     """Отправка приветственного сообщения и меню"""
@@ -159,19 +151,16 @@ async def send_welcome_message(chat_id: int, is_admin=False):
     keyboard = get_main_menu_keyboard(is_admin=is_admin)
     await bot.send_message(chat_id=chat_id, text=welcome_text, reply_markup=keyboard)
 
-
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
-    is_admin = str(message.from_user.id) == os.getenv("ADMIN_ID")
-    await send_welcome_message(message.chat.id, is_admin=is_admin)
-
+    admin_status = is_admin(message.from_user.id)
+    await send_welcome_message(message.chat.id, is_admin=admin_status)
 
 @dp.message(Command("main_menu"))
 async def cmd_main_menu(message: types.Message):
-    is_admin = str(message.from_user.id) == os.getenv("ADMIN_ID")
-    keyboard = get_main_menu_keyboard(is_admin=is_admin)
+    admin_status = is_admin(message.from_user.id)
+    keyboard = get_main_menu_keyboard(is_admin=admin_status)
     await message.answer("Выберите задачу:", reply_markup=keyboard)
-
 
 @dp.message(Command("upload"))
 async def cmd_upload(message: types.Message, state: FSMContext):
@@ -187,7 +176,6 @@ async def cmd_upload(message: types.Message, state: FSMContext):
         "- source_type: тип источника"
     )
     await state.set_state(CSVUpload.waiting_for_file)
-
 
 @dp.message(CSVUpload.waiting_for_file)
 async def process_csv_file(message: types.Message, state: FSMContext):
@@ -219,38 +207,36 @@ async def process_csv_file(message: types.Message, state: FSMContext):
         os.remove(temp_file)
     await state.clear()
 
-
 @dp.message(Command("subscribe"))
 async def cmd_subscribe(message: types.Message, state: FSMContext):
     """Обработчик команды подписки на ежедневные новости"""
     # Получаем список категорий
     categories = vector_store.get_categories()
-
+    
     if not categories:
         await message.answer("❌ Нет доступных категорий для подписки")
         return
-
+    
     # Создаем клавиатуру с категориями
     keyboard = types.ReplyKeyboardMarkup(
         keyboard=[[types.KeyboardButton(text=category)] for category in categories],
         resize_keyboard=True
     )
-
+    
     await message.answer(
         "📊 Выберите категории для подписки на ежедневные новости:",
         reply_markup=keyboard
     )
     await state.set_state(SubscriptionStates.waiting_for_category)
 
-
 @dp.message(SubscriptionStates.waiting_for_category)
 async def process_subscription_category(message: types.Message, state: FSMContext):
     """Обработчик выбора категории для подписки"""
     category = message.text
-
+    
     # Проверяем существующую подписку
     subscription = get_user_subscription(message.chat.id)
-
+    
     if subscription:
         # Обновляем существующую подписку
         categories = subscription.get('categories', [])
@@ -260,7 +246,7 @@ async def process_subscription_category(message: types.Message, state: FSMContex
         else:
             categories.append(category)
             await message.answer(f"✅ Подписались на категорию: {category}")
-
+        
         update_user_subscription(message.chat.id, categories)
     else:
         # Создаем новую подписку с начальной категорией
@@ -269,13 +255,12 @@ async def process_subscription_category(message: types.Message, state: FSMContex
         else:
             await message.answer("❌ Произошла ошибка при создании подписки")
             logger.error("Ошибка при создании подписки")
-
+    
     await state.clear()
     await message.answer(
         "Теперь вы будете получать ежедневные новости по выбранным категориям.",
         reply_markup=types.ReplyKeyboardRemove()
     )
-
 
 @dp.callback_query(lambda c: c.data == "menu_sources")
 async def menu_sources_callback(callback_query: types.CallbackQuery):
@@ -292,31 +277,14 @@ async def menu_sources_callback(callback_query: types.CallbackQuery):
         reply_markup=keyboard
     )
 
-
 @dp.callback_query(lambda c: c.data == "main_menu")
 async def main_menu_callback(callback_query: types.CallbackQuery):
-    if str(callback_query.from_user.id) == os.getenv("ADMIN_ID"):
-        keyboard = InlineKeyboardMarkup(
-            inline_keyboard=[
-                [InlineKeyboardButton(text="Источники", callback_data="menu_sources")],
-                [InlineKeyboardButton(text="Анализ", callback_data="menu_analysis")],
-                [InlineKeyboardButton(text="Подписка на дайджест", callback_data="menu_subscription")],
-                [InlineKeyboardButton(text="Telegram авторизация", callback_data="tg_auth_request_menu")],
-            ]
-        )
-    else:
-        keyboard = InlineKeyboardMarkup(
-            inline_keyboard=[
-                [InlineKeyboardButton(text="Источники", callback_data="menu_sources")],
-                [InlineKeyboardButton(text="Анализ", callback_data="menu_analysis")],
-                [InlineKeyboardButton(text="Подписка на дайджест", callback_data="menu_subscription")],
-            ]
-        )
+    admin_status = is_admin(callback_query.from_user.id)
+    keyboard = get_main_menu_keyboard(is_admin=admin_status)
     await callback_query.message.edit_text(
         "👋 Привет! Я бот для анализа трендов.\n\nВыберите действие:",
         reply_markup=keyboard
     )
-
 
 @dp.callback_query(lambda c: c.data == "sources_upload")
 async def sources_upload_callback(callback_query: types.CallbackQuery):
@@ -329,27 +297,24 @@ async def sources_upload_callback(callback_query: types.CallbackQuery):
         ]
     )
     await callback_query.message.edit_text(
-        "📥 Загрузка источников:\nВыберите тип:",
+        "📥 Загрузка источников:\n❗️Добавленные категории будут видны для подписки/анализа только после успешного парсинга данных❗️\nВыберите тип:",
         reply_markup=keyboard
     )
-
 
 @dp.callback_query(lambda c: c.data == "sources_manage")
 async def sources_manage_callback(callback_query: types.CallbackQuery):
     sources = get_sources()
     keyboard = InlineKeyboardMarkup(
         inline_keyboard=[
-                            [InlineKeyboardButton(text=f"{src.get('type', '?')}: {src.get('url', '')}",
-                                                  callback_data=f"noop_{i}"),
-                             InlineKeyboardButton(text="Удалить", callback_data=f"delete_source_{src.get('url', '')}")]
-                            for i, src in enumerate(sources)
-                        ] + [[InlineKeyboardButton(text="← Назад", callback_data="menu_sources")]]
+            [InlineKeyboardButton(text=f"{src.get('type','?')}: {src.get('url','')}", callback_data=f"noop_{i}"),
+             InlineKeyboardButton(text="Удалить", callback_data=f"delete_source_{src.get('url','')}")]
+            for i, src in enumerate(sources)
+        ] + [[InlineKeyboardButton(text="← Назад", callback_data="menu_sources")]]
     )
     await callback_query.message.edit_text(
         "🗂 Активные источники:",
         reply_markup=keyboard
     )
-
 
 @dp.callback_query(lambda c: c.data.startswith("delete_source_"))
 async def delete_source_callback(callback_query: types.CallbackQuery):
@@ -360,7 +325,6 @@ async def delete_source_callback(callback_query: types.CallbackQuery):
         await callback_query.answer("Ошибка при удалении", show_alert=True)
     # Обновить список после удаления
     await sources_manage_callback(callback_query)
-
 
 @dp.callback_query(lambda c: c.data == "menu_analysis")
 async def menu_analysis_callback(callback_query: types.CallbackQuery):
@@ -376,7 +340,6 @@ async def menu_analysis_callback(callback_query: types.CallbackQuery):
         reply_markup=keyboard
     )
 
-
 @dp.callback_query(lambda c: c.data == "menu_subscription")
 async def menu_subscription_callback(callback_query: types.CallbackQuery):
     user_id = callback_query.from_user.id
@@ -386,17 +349,16 @@ async def menu_subscription_callback(callback_query: types.CallbackQuery):
     user_subs = get_user_subscription(user_id)["categories"]
     keyboard = InlineKeyboardMarkup(
         inline_keyboard=[
-                            [InlineKeyboardButton(
-                                text=(cat + (" ✅" if cat in user_subs else "")),
-                                callback_data=f"toggle_sub_{cat}")]
-                            for cat in categories
-                        ] + [[InlineKeyboardButton(text="← Назад", callback_data="main_menu")]]
+            [InlineKeyboardButton(
+                text=(cat + (" ✅" if cat in user_subs else "")),
+                callback_data=f"toggle_sub_{cat}")]
+            for cat in categories
+        ] + [[InlineKeyboardButton(text="← Назад", callback_data="main_menu")]]
     )
     await callback_query.message.edit_text(
-        "🔔 Подписка на дайджест:\nВыберите категории:",
+        "🔔 Подписка на ежедневный дайджест:\n❗️Отправка дайджеста в 14:00❗️\n\n✅ - категории, на которые вы подписаны\n\nВыберите категории:",
         reply_markup=keyboard
     )
-
 
 @dp.callback_query(lambda c: c.data.startswith("toggle_sub_"))
 async def toggle_subscription_callback(callback_query: types.CallbackQuery):
@@ -415,17 +377,16 @@ async def toggle_subscription_callback(callback_query: types.CallbackQuery):
     categories = get_categories()
     keyboard = InlineKeyboardMarkup(
         inline_keyboard=[
-                            [InlineKeyboardButton(
-                                text=(categ + (" ✅" if categ in user_subs else "")),
-                                callback_data=f"toggle_sub_{categ}")]
-                            for categ in categories
-                        ] + [[InlineKeyboardButton(text="← Назад", callback_data="main_menu")]]
+            [InlineKeyboardButton(
+                text=(categ + (" ✅" if categ in user_subs else "")),
+                callback_data=f"toggle_sub_{categ}")]
+            for categ in categories
+        ] + [[InlineKeyboardButton(text="← Назад", callback_data="main_menu")]]
     )
     await callback_query.message.edit_text(
-        "🔔 Подписка на дайджест:\nВыберите категории:",
+        "🔔 Подписка на ежедневный дайджест:\n❗️Отправка дайджеста в 14:00❗️\n\n✅ - категории, на которые вы подписаны\n\nВыберите категории:",
         reply_markup=keyboard
     )
-
 
 @dp.callback_query(lambda c: c.data == "upload_csv")
 async def upload_csv_callback(callback_query: types.CallbackQuery, state: FSMContext):
@@ -433,22 +394,20 @@ async def upload_csv_callback(callback_query: types.CallbackQuery, state: FSMCon
         "📤 Пожалуйста, отправьте CSV-файл для массовой загрузки источников.")
     await state.set_state(CSVUpload.waiting_for_file)
 
-
 @dp.callback_query(lambda c: c.data == "upload_rss")
 async def upload_rss_callback(callback_query: types.CallbackQuery, state: FSMContext):
     categories = vector_store.get_categories()
     keyboard = InlineKeyboardMarkup(
         inline_keyboard=[
-                            [InlineKeyboardButton(text=cat, callback_data=f"rss_cat_{cat}")] for cat in categories
-                        ] + [
-                            [InlineKeyboardButton(text="Своя категория", callback_data="rss_cat_custom")],
-                            [InlineKeyboardButton(text="← Назад", callback_data="sources_upload")]
-                        ]
+            [InlineKeyboardButton(text=cat, callback_data=f"rss_cat_{cat}")] for cat in categories
+        ] + [
+            [InlineKeyboardButton(text="Своя категория", callback_data="rss_cat_custom")],
+            [InlineKeyboardButton(text="← Назад", callback_data="sources_upload")]
+        ]
     )
     await callback_query.message.edit_text(
         "Выберите категорию для RSS-источника:", reply_markup=keyboard)
     await state.set_state(RSSUpload.waiting_for_category)
-
 
 @dp.callback_query(lambda c: c.data.startswith("rss_cat_"))
 async def rss_category_chosen(callback_query: types.CallbackQuery, state: FSMContext):
@@ -472,7 +431,6 @@ async def rss_category_chosen(callback_query: types.CallbackQuery, state: FSMCon
         )
         await state.set_state(RSSUpload.waiting_for_rss)
 
-
 @dp.message(RSSUpload.waiting_for_category)
 async def rss_custom_category(message: types.Message, state: FSMContext):
     data = await state.get_data()
@@ -486,7 +444,6 @@ async def rss_custom_category(message: types.Message, state: FSMContext):
         )
     )
     await state.set_state(RSSUpload.waiting_for_rss)
-
 
 @dp.message(RSSUpload.waiting_for_rss)
 async def process_rss_link(message: types.Message, state: FSMContext):
@@ -503,29 +460,28 @@ async def process_rss_link(message: types.Message, state: FSMContext):
         if save_sources_db(source):
             await message.answer(f"✅ RSS-источник добавлен: {url}")
             await message.answer(
-                "Хотите запустить парсинг новых источников?",
-                reply_markup=get_parse_sources_keyboard()
+                "Хотите добавить еще один RSS-источник или завершить?",
+                reply_markup=get_add_more_sources_keyboard("rss")
             )
+            await state.set_state(RSSUpload.waiting_for_more_rss)
         else:
             await message.answer("❌ Ошибка при сохранении RSS-источника.")
-    await state.clear()
-
+            await state.clear()
 
 @dp.callback_query(lambda c: c.data == "upload_tg")
 async def upload_tg_callback(callback_query: types.CallbackQuery, state: FSMContext):
     categories = vector_store.get_categories()
     keyboard = InlineKeyboardMarkup(
         inline_keyboard=[
-                            [InlineKeyboardButton(text=cat, callback_data=f"tg_cat_{cat}")] for cat in categories
-                        ] + [
-                            [InlineKeyboardButton(text="Своя категория", callback_data="tg_cat_custom")],
-                            [InlineKeyboardButton(text="← Назад", callback_data="sources_upload")]
-                        ]
+            [InlineKeyboardButton(text=cat, callback_data=f"tg_cat_{cat}")] for cat in categories
+        ] + [
+            [InlineKeyboardButton(text="Своя категория", callback_data="tg_cat_custom")],
+            [InlineKeyboardButton(text="← Назад", callback_data="sources_upload")]
+        ]
     )
     await callback_query.message.edit_text(
         "Выберите категорию для Telegram-канала:", reply_markup=keyboard)
     await state.set_state(TGUpload.waiting_for_category)
-
 
 @dp.callback_query(lambda c: c.data.startswith("tg_cat_"))
 async def tg_category_chosen(callback_query: types.CallbackQuery, state: FSMContext):
@@ -549,7 +505,6 @@ async def tg_category_chosen(callback_query: types.CallbackQuery, state: FSMCont
         )
         await state.set_state(TGUpload.waiting_for_tg)
 
-
 @dp.message(TGUpload.waiting_for_category)
 async def tg_custom_category(message: types.Message, state: FSMContext):
     data = await state.get_data()
@@ -563,7 +518,6 @@ async def tg_custom_category(message: types.Message, state: FSMContext):
         )
     )
     await state.set_state(TGUpload.waiting_for_tg)
-
 
 @dp.message(TGUpload.waiting_for_tg)
 async def process_tg_channel(message: types.Message, state: FSMContext):
@@ -585,29 +539,84 @@ async def process_tg_channel(message: types.Message, state: FSMContext):
         if save_sources_db(source):
             await message.answer(f"✅ Telegram-канал добавлен: {url}")
             await message.answer(
-                "Хотите запустить парсинг новых источников?",
-                reply_markup=get_parse_sources_keyboard()
+                "Хотите добавить еще один Telegram-канал или завершить?",
+                reply_markup=get_add_more_sources_keyboard("tg")
+            )
+            await state.set_state(TGUpload.waiting_for_more_tg)
+        else:
+            await message.answer("❌ Ошибка при сохранении Telegram-канала.")
+            await state.clear()
+
+@dp.message(RSSUpload.waiting_for_more_rss)
+async def process_more_rss_link(message: types.Message, state: FSMContext):
+    url = message.text.strip()
+    data = await state.get_data()
+    category = data.get("category", "Общее")
+    if not url.startswith("http"):
+        await message.answer("❌ Пожалуйста, введите корректную ссылку на RSS-ленту.")
+        return
+    if is_source_exists_db(url):
+        await message.answer("⚠️ Такой источник уже существует (дубликат).")
+    else:
+        source = {"url": url, "type": "rss", "category": category}
+        if save_sources_db(source):
+            await message.answer(f"✅ RSS-источник добавлен: {url}")
+            await message.answer(
+                "Хотите добавить еще один RSS-источник или завершить?",
+                reply_markup=get_add_more_sources_keyboard("rss")
+            )
+        else:
+            await message.answer("❌ Ошибка при сохранении RSS-источника.")
+            await state.clear()
+
+@dp.message(TGUpload.waiting_for_more_tg)
+async def process_more_tg_channel(message: types.Message, state: FSMContext):
+    tg_id = message.text.strip()
+    data = await state.get_data()
+    category = data.get("category", "Общее")
+    # Привести к username
+    if tg_id.startswith("https://t.me/"):
+        tg_id = tg_id.replace("https://t.me/", "").replace("/", "")
+    tg_id = tg_id.lstrip("@")
+    if not tg_id:
+        await message.answer("❌ Пожалуйста, введите корректный username или ссылку на Telegram-канал.")
+        return
+    url = f"https://t.me/{tg_id}"
+    if is_source_exists_db(url):
+        await message.answer("⚠️ Такой источник уже существует (дубликат).")
+    else:
+        source = {"url": url, "type": "telegram", "category": category}
+        if save_sources_db(source):
+            await message.answer(f"✅ Telegram-канал добавлен: {url}")
+            await message.answer(
+                "Хотите добавить еще один Telegram-канал или завершить?",
+                reply_markup=get_add_more_sources_keyboard("tg")
             )
         else:
             await message.answer("❌ Ошибка при сохранении Telegram-канала.")
-    await state.clear()
-
+            await state.clear()
 
 # Кнопки назад для upload_rss и upload_tg
 @dp.callback_query(lambda c: c.data == "sources_upload")
 async def back_to_sources_upload(callback_query: types.CallbackQuery, state: FSMContext):
     await sources_upload_callback(callback_query, state)
 
-
 @dp.callback_query(lambda c: c.data == "upload_rss")
 async def back_to_upload_rss(callback_query: types.CallbackQuery, state: FSMContext):
     await upload_rss_callback(callback_query, state)
-
 
 @dp.callback_query(lambda c: c.data == "upload_tg")
 async def back_to_upload_tg(callback_query: types.CallbackQuery, state: FSMContext):
     await upload_tg_callback(callback_query, state)
 
+# Обработчики для кнопок "Назад" в состояниях добавления дополнительных источников
+@dp.callback_query(lambda c: c.data == "upload_rss", RSSUpload.waiting_for_more_rss)
+async def back_to_upload_rss_from_more(callback_query: types.CallbackQuery, state: FSMContext):
+    await upload_rss_callback(callback_query, state)
+
+@dp.callback_query(lambda c: c.data == "upload_tg", TGUpload.waiting_for_more_tg)
+async def back_to_upload_tg_from_more(callback_query: types.CallbackQuery, state: FSMContext):
+    await upload_tg_callback(callback_query, state)
 
 @dp.callback_query(lambda c: c.data == "parse_sources_menu")
 async def parse_sources_menu_callback(callback_query: CallbackQuery):
@@ -616,29 +625,67 @@ async def parse_sources_menu_callback(callback_query: CallbackQuery):
         reply_markup=get_parse_sources_keyboard()
     )
 
-
 @dp.callback_query(lambda c: c.data == "parse_sources_confirm")
-async def parse_sources_confirm_callback(callback_query: CallbackQuery):
-    parse_and_vectorize_sources.delay()
+async def parse_sources_confirm_callback(callback_query: CallbackQuery, state: FSMContext):
+    parse_and_vectorize_sources.delay(callback_query.message.chat.id)
     await callback_query.message.edit_text(
-        "⏳ Парсинг источников запущен! Вы получите уведомление после завершения."
+        "⏳ Парсинг источников запущен! Вы получите уведомление после завершения.",
+        reply_markup=InlineKeyboardMarkup(
+            inline_keyboard=[[InlineKeyboardButton(text="← В главное меню", callback_data="main_menu")]]
+        )
     )
-
+    await state.clear()
 
 @dp.callback_query(lambda c: c.data == "parse_sources_cancel")
 async def parse_sources_cancel_callback(callback_query: CallbackQuery):
     await callback_query.message.edit_text("❌ Парсинг источников отменён.")
 
+@dp.callback_query(lambda c: c.data.startswith("add_more_"))
+async def add_more_sources_callback(callback_query: CallbackQuery, state: FSMContext):
+    source_type = callback_query.data.replace("add_more_", "")
+    data = await state.get_data()
+    category = data.get("category", "Общее")
+    
+    if source_type == "rss":
+        await callback_query.message.edit_text(
+            f"Категория: {category}\nВведите ссылку на RSS-ленту:",
+            reply_markup=InlineKeyboardMarkup(
+                inline_keyboard=[[InlineKeyboardButton(text="← Назад", callback_data="upload_rss")]]
+            )
+        )
+        await state.set_state(RSSUpload.waiting_for_more_rss)
+    elif source_type == "tg":
+        await callback_query.message.edit_text(
+            f"Категория: {category}\nВведите username или ссылку на Telegram-канал:",
+            reply_markup=InlineKeyboardMarkup(
+                inline_keyboard=[[InlineKeyboardButton(text="← Назад", callback_data="upload_tg")]]
+            )
+        )
+        await state.set_state(TGUpload.waiting_for_more_tg)
 
-@dp.message(Command("tg_auth_request"))
-async def cmd_tg_auth_request(message: types.Message):
-    """Ручной запрос нового кода авторизации Telegram"""
-    if str(message.chat.id) != os.getenv("ADMIN_CHAT_ID"):
-        await message.answer("⛔️ Только администратор может инициировать авторизацию Telegram.")
+@dp.callback_query(lambda c: c.data == "finish_adding_sources")
+async def finish_adding_sources_callback(callback_query: CallbackQuery, state: FSMContext):
+    await callback_query.message.edit_text(
+        "✅ Добавление источников завершено!",
+        reply_markup=InlineKeyboardMarkup(
+            inline_keyboard=[[InlineKeyboardButton(text="← В главное меню", callback_data="main_menu")]]
+        )
+    )
+    await state.clear()
+
+@dp.message(Command("tg_auth_status"))
+async def cmd_tg_auth_status(message: types.Message):
+    """Проверка статуса авторизации Telegram"""
+    if not is_admin(message.from_user.id):
+        await message.answer("⛔️ Только администратор может проверять статус авторизации Telegram.")
         return
-    periodic_telegram_auth_check.delay()
-    await message.answer(
-        "🔄 Запрос на отправку нового кода авторизации отправлен. Проверьте Telegram и введите новый код сюда.")
+    
+    await message.answer("🔍 Запускаю проверку статуса авторизации Telegram...")
+    
+    # Запускаем проверку в Celery
+    print(f"DEBUG: Запускаем check_telegram_auth_status.delay с chat_id: {message.chat.id}")
+    check_telegram_auth_status.delay(message.chat.id)
+
 
 
 @dp.callback_query(lambda c: c.data == "tg_auth_request_menu")
@@ -646,25 +693,37 @@ async def tg_auth_request_menu_callback(callback_query: types.CallbackQuery):
     keyboard = InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text="Запросить новый код", callback_data="tg_auth_request_confirm")],
+            [InlineKeyboardButton(text="Проверить статус", callback_data="tg_auth_status_check")],
             [InlineKeyboardButton(text="← Назад", callback_data="main_menu")],
         ]
     )
     await callback_query.message.edit_text(
-        "🔑 Запросить новый код авторизации Telegram?",
+        "🔑 Управление авторизацией Telegram:",
         reply_markup=keyboard
     )
 
-
 @dp.callback_query(lambda c: c.data == "tg_auth_request_confirm")
 async def tg_auth_request_confirm_callback(callback_query: types.CallbackQuery):
-    if str(callback_query.message.chat.id) != os.getenv("ADMIN_CHAT_ID"):
+    if not is_admin(callback_query.from_user.id):
         await callback_query.answer("⛔️ Только администратор может инициировать авторизацию Telegram.", show_alert=True)
         return
-    periodic_telegram_auth_check.delay()
-    await callback_query.message.edit_text(
-        "🔄 Запрос на отправку нового кода авторизации отправлен. Проверьте Telegram и введите новый код сюда."
-    )
+    
+    await callback_query.message.edit_text("🔄 Запускаю запрос на отправку нового кода авторизации...")
+    
+    # Запускаем задачу в Celery
+    periodic_telegram_auth_check.delay(callback_query.message.chat.id)
 
+@dp.callback_query(lambda c: c.data == "tg_auth_status_check")
+async def tg_auth_status_check_callback(callback_query: types.CallbackQuery):
+    if not is_admin(callback_query.from_user.id):
+        await callback_query.answer("⛔️ Только администратор может проверять статус авторизации Telegram.", show_alert=True)
+        return
+    
+    await callback_query.message.edit_text("🔍 Запускаю проверку статуса авторизации Telegram...")
+    
+    # Запускаем проверку в Celery
+    print(f"DEBUG: Запускаем check_telegram_auth_status.delay с chat_id: {callback_query.message.chat.id}")
+    check_telegram_auth_status.delay(callback_query.message.chat.id)
 
 @dp.callback_query(lambda c: c.data == "analysis_digest_menu")
 async def analysis_digest_menu_callback(callback_query: types.CallbackQuery):
@@ -680,22 +739,19 @@ async def analysis_digest_menu_callback(callback_query: types.CallbackQuery):
         reply_markup=keyboard
     )
 
-
 # Анализ по запросу: выбор категории через кнопки, затем ввод запроса
 @dp.callback_query(lambda c: c.data == "analysis_query")
 async def analysis_query_category_callback(callback_query: types.CallbackQuery, state: FSMContext):
     categories = VectorStore().get_categories()
     keyboard = InlineKeyboardMarkup(
-        inline_keyboard=[[InlineKeyboardButton(text=cat, callback_data=f"analysis_query_cat_{cat}")] for cat in
-                         categories] +
-                        [[InlineKeyboardButton(text="← Назад", callback_data="menu_analysis")]]
+        inline_keyboard=[[InlineKeyboardButton(text=cat, callback_data=f"analysis_query_cat_{cat}")] for cat in categories] +
+        [[InlineKeyboardButton(text="← Назад", callback_data="menu_analysis")]]
     )
     await callback_query.message.edit_text(
         "Выберите категорию для анализа:",
         reply_markup=keyboard
     )
     await state.set_state(CustomStates.analysis_query_category)
-
 
 @dp.callback_query(lambda c: c.data.startswith("analysis_query_cat_"))
 async def analysis_query_input_callback(callback_query: types.CallbackQuery, state: FSMContext):
@@ -706,32 +762,28 @@ async def analysis_query_input_callback(callback_query: types.CallbackQuery, sta
     )
     await state.set_state(CustomStates.analysis_query_input)
 
-
 @dp.message(CustomStates.analysis_query_input)
 async def analysis_query_run(message: types.Message, state: FSMContext):
     data = await state.get_data()
     category = data.get("category")
     user_query = message.text.strip()
-    await message.answer("⏳ Анализируем... Ожидайте результат.")
+    await message.answer("⏳ Анализируем материалы... Ожидайте результат в течении получаса.")
     analyze_trend_task.delay(category=category, user_query=user_query, chat_id=message.chat.id)
     await state.clear()
-
 
 # Ежедневный дайджест: выбор категории и даты
 @dp.callback_query(lambda c: c.data == "analysis_daily")
 async def analysis_daily_category_callback(callback_query: types.CallbackQuery, state: FSMContext):
     categories = VectorStore().get_categories()
     keyboard = InlineKeyboardMarkup(
-        inline_keyboard=[[InlineKeyboardButton(text=cat, callback_data=f"analysis_daily_cat_{cat}")] for cat in
-                         categories] +
-                        [[InlineKeyboardButton(text="← Назад", callback_data="analysis_digest_menu")]]
+        inline_keyboard=[[InlineKeyboardButton(text=cat, callback_data=f"analysis_daily_cat_{cat}")] for cat in categories] +
+        [[InlineKeyboardButton(text="← Назад", callback_data="analysis_digest_menu")]]
     )
     await callback_query.message.edit_text(
         "Выберите категорию для ежедневного дайджеста:",
         reply_markup=keyboard
     )
     await state.set_state(CustomStates.analysis_daily_category)
-
 
 @dp.callback_query(lambda c: c.data.startswith("analysis_daily_cat_"))
 async def analysis_daily_date_input_callback(callback_query: types.CallbackQuery, state: FSMContext):
@@ -743,7 +795,6 @@ async def analysis_daily_date_input_callback(callback_query: types.CallbackQuery
     )
     await state.set_state(CustomStates.analysis_daily_date)
 
-
 @dp.callback_query(simple_cal_callback.filter(), CustomStates.analysis_daily_date)
 async def process_daily_calendar(callback_query: types.CallbackQuery, callback_data: dict, state: FSMContext):
     selected, date = await SimpleCalendar().process_selection(callback_query, callback_data)
@@ -751,25 +802,22 @@ async def process_daily_calendar(callback_query: types.CallbackQuery, callback_d
         data = await state.get_data()
         category = data.get("category")
         date_str = date.strftime("%Y-%m-%d")
-        await callback_query.message.answer("⏳ Формируем дайджест... Ожидайте результат.")
+        await callback_query.message.answer("⏳ Формируем ежедневный дайджест... Ожидайте результат в течении получаса.")
         analyze_news_task.delay(category=category, analysis_date=date_str, chat_id=callback_query.message.chat.id)
         await state.clear()
-
 
 @dp.callback_query(lambda c: c.data == "analysis_weekly")
 async def analysis_weekly_category_callback(callback_query: types.CallbackQuery, state: FSMContext):
     categories = VectorStore().get_categories()
     keyboard = InlineKeyboardMarkup(
-        inline_keyboard=[[InlineKeyboardButton(text=cat, callback_data=f"analysis_weekly_cat_{cat}")] for cat in
-                         categories] +
-                        [[InlineKeyboardButton(text="← Назад", callback_data="analysis_digest_menu")]]
+        inline_keyboard=[[InlineKeyboardButton(text=cat, callback_data=f"analysis_weekly_cat_{cat}")] for cat in categories] +
+        [[InlineKeyboardButton(text="← Назад", callback_data="analysis_digest_menu")]]
     )
     await callback_query.message.edit_text(
         "Выберите категорию для еженедельного дайджеста:",
         reply_markup=keyboard
     )
     await state.set_state(CustomStates.analysis_weekly_category)
-
 
 @dp.callback_query(lambda c: c.data.startswith("analysis_weekly_cat_"))
 async def analysis_weekly_date_input_callback(callback_query: types.CallbackQuery, state: FSMContext):
@@ -781,7 +829,6 @@ async def analysis_weekly_date_input_callback(callback_query: types.CallbackQuer
     )
     await state.set_state(CustomStates.analysis_weekly_date)
 
-
 @dp.callback_query(simple_cal_callback.filter(), CustomStates.analysis_weekly_date)
 async def process_weekly_calendar(callback_query: types.CallbackQuery, callback_data: dict, state: FSMContext):
     selected, date = await SimpleCalendar().process_selection(callback_query, callback_data)
@@ -789,35 +836,31 @@ async def process_weekly_calendar(callback_query: types.CallbackQuery, callback_
         data = await state.get_data()
         category = data.get("category")
         date_str = date.strftime("%Y-%m-%d")
-        await callback_query.message.answer("⏳ Формируем еженедельный дайджест... Ожидайте результат.")
-        analyze_weekly_news_task.delay(category=category, analysis_start_date=date_str,
-                                       chat_id=callback_query.message.chat.id)
+        await callback_query.message.answer("⏳ Формируем еженедельный дайджест... Ожидайте результат в течении часа.")
+        analyze_weekly_news_task.delay(category=category, analysis_start_date=date_str, chat_id=callback_query.message.chat.id)
         await state.clear()
-
 
 async def set_commands():
     """Установка команд бота"""
     commands = [
         types.BotCommand(command="start", description="Запустить бота"),
         types.BotCommand(command="main_menu", description="Функционал бота"),
+        types.BotCommand(command="tg_auth_status", description="Проверить статус авторизации Telegram"),
     ]
     await bot.set_my_commands(commands)
 
+#-----------------------------------------------------------------------
+#Функционал авторизации в Telegram
+#-----------------------------------------------------------------------
 
-# -----------------------------------------------------------------------
-# Функционал авторизации в Telegram
-# -----------------------------------------------------------------------
-
-# Инициализация клиента Redis и констант (можно вынести в отдельный config.py)
+# Инициализация клиента Redis для проверки состояния авторизации
 redis_client = redis.Redis(host='localhost', port=6379, db=0, decode_responses=True)
 AUTH_STATE_KEY_PREFIX = "telegram_auth_state:"
-API_ID = os.getenv('API_ID')
-API_HASH = os.getenv('API_HASH')
 PHONE_NUMBER = os.getenv('PHONE_NUMBER')
 
 
-# Добавить этот обработчик в bot.py
-@dp.message(lambda message: message.text and str(message.chat.id) == os.getenv("ADMIN_CHAT_ID"))
+# Обработчик сообщений от админа для авторизации
+@dp.message(lambda message: message.text and is_admin_chat(message.chat.id))
 async def handle_auth_messages(message: types.Message, state: FSMContext):
     """
     Перехватывает все текстовые сообщения от админа и проверяет,
@@ -828,7 +871,7 @@ async def handle_auth_messages(message: types.Message, state: FSMContext):
     if current_state is not None:
         # Если бот уже ждет чего-то другого (файл, категорию), игнорируем
         return
-
+        
     auth_key = f"{AUTH_STATE_KEY_PREFIX}{PHONE_NUMBER}"
     state_raw = redis_client.get(auth_key)
 
@@ -836,45 +879,12 @@ async def handle_auth_messages(message: types.Message, state: FSMContext):
         # Если процесс авторизации не запущен, ничего не делаем
         return
 
-    # Если процесс запущен, обрабатываем сообщение
-    await message.answer("⏳ Получил, обрабатываю...")
-    auth_state = json.loads(state_raw)
+    # Если процесс запущен, делегируем обработку Celery
+    await message.answer("⏳ Получил код, обрабатываю...")
     response_text = message.text.strip()
-
-    tg_client = TelegramClient(SESSION_FILE, API_ID, API_HASH)
-
-    try:
-        await tg_client.connect()
-        current_status = auth_state.get("status")
-
-        if current_status == "awaiting_code":
-            await tg_client.sign_in(
-                phone=PHONE_NUMBER,
-                code=response_text,
-                phone_code_hash=auth_state["phone_code_hash"]
-            )
-        elif current_status == "awaiting_password":
-            await tg_client.sign_in(password=response_text)
-
-        # Если мы здесь, вход успешен
-        await message.answer("✅ Отлично! Авторизация прошла успешно.")
-        redis_client.delete(auth_key)  # Очищаем состояние
-
-    except SessionPasswordNeededError:
-        await message.answer("🔐 Обнаружена двухфакторная аутентификация. Теперь отправьте мне ваш пароль.")
-        auth_state["status"] = "awaiting_password"
-        redis_client.set(auth_key, json.dumps(auth_state), ex=600)
-    except (PhoneCodeInvalidError, PasswordHashInvalidError):
-        await message.answer("❌ Неверный код или пароль. Процесс сброшен. Он начнется заново при следующей проверке.")
-        redis_client.delete(auth_key)
-    except Exception as e:
-        await message.answer(f"🤯 Произошла ошибка: {e}. Процесс сброшен.")
-        redis_client.delete(auth_key)
-        logger.error(f"Ошибка при завершении авторизации: {e}", exc_info=True)
-    finally:
-        if tg_client.is_connected():
-            await tg_client.disconnect()
-
+    
+    # Запускаем Celery задачу для обработки кода
+    process_auth_code.delay(response_text, message.chat.id)
 
 # --- ВСПОМОГАТЕЛЬНАЯ КНОПКА ДЛЯ ПАРСИНГА ---
 def get_parse_sources_keyboard():
@@ -885,24 +895,31 @@ def get_parse_sources_keyboard():
         ]
     )
 
+# --- КЛАВИАТУРА ДЛЯ ПРОДОЛЖЕНИЯ ДОБАВЛЕНИЯ ИСТОЧНИКОВ ---
+def get_add_more_sources_keyboard(source_type: str):
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="Загрузить еще", callback_data=f"add_more_{source_type}")],
+            [InlineKeyboardButton(text="Запустить парсинг", callback_data="parse_sources_confirm")],
+            [InlineKeyboardButton(text="Завершить", callback_data="finish_adding_sources")],
+        ]
+    )
 
 # Отладочная информация
 print(f"DEBUG: SESSION_FILE в bot.py = {SESSION_FILE}")
 print(f"DEBUG: Файл сессии существует: {os.path.exists(SESSION_FILE + '.session')}")
-
 
 async def main():
     """Основная функция запуска бота"""
     try:
         # Устанавливаем команды бота
         await set_commands()
-
+        
         # Запускаем бота
         await dp.start_polling(bot)
     except Exception as e:
         logger.error(f"Ошибка при запуске бота: {str(e)}")
         raise
-
 
 if __name__ == "__main__":
     asyncio.run(main())

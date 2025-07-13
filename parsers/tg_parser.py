@@ -37,14 +37,33 @@ async def ensure_authorized():
     client = TelegramClient(SESSION_FILE, os.getenv('API_ID'), os.getenv('API_HASH'))
     try:
         await client.connect()
-        if os.path.exists(f"{SESSION_FILE}.session"):
-            log.info("Найдена сохраненная сессия Telegram")
-        if not await client.is_user_authorized():
+        
+        # Проверяем существование файла сессии
+        session_file = f"{SESSION_FILE}.session"
+        if os.path.exists(session_file):
+            log.info(f"Найдена сохраненная сессия Telegram: {session_file}")
+            log.info(f"Размер файла сессии: {os.path.getsize(session_file)} байт")
+        else:
+            log.warning(f"Файл сессии не найден: {session_file}")
+        
+        # Проверяем авторизацию
+        is_authorized = await client.is_user_authorized()
+        log.info(f"Статус авторизации: {is_authorized}")
+        
+        if not is_authorized:
             log.error("❌ Требуется авторизация в Telegram. Пропускаем источник.")
             await client.disconnect()
             return None
         else:
             log.info("✅ Уже авторизован в Telegram (используется сохраненная сессия)")
+            
+            # Дополнительная проверка - попробуем получить информацию о себе
+            try:
+                me = await client.get_me()
+                log.info(f"✅ Подключен как: {me.first_name} {me.last_name or ''} (@{me.username or 'без username'})")
+            except Exception as e:
+                log.warning(f"Не удалось получить информацию о пользователе: {e}")
+                
         return client
     except Exception as e:
         log.error(f"❌ Ошибка при авторизации: {str(e)}")

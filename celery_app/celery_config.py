@@ -55,6 +55,7 @@ imports = (
     'celery_app.tasks.vectorization_tasks',
     'celery_app.tasks.auth_TG',
     'celery_app.tasks.parse_embed_data',
+    'celery_app.tasks.weekly_news_tasks',
 )
 
 # Дополнительные настройки для отладки
