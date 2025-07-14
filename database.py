@@ -46,6 +46,9 @@ db.subscriptions.create_index("user_id", unique=True)
 # Создаем индексы для таблицы sources
 db.sources.create_index([("url", 1), ("type", 1)], unique=True)
 
+# Создаем индексы для таблицы daily_news
+db.daily_news.create_index([("category", 1), ("date", 1)], unique=True)
+
 def save_source(source: Dict[str, Any]) -> bool:
     """
     Сохраняет данные в базу данных
@@ -309,3 +312,32 @@ def delete_source(url):
     except Exception as e:
         logger.error(f"Ошибка при удалении источника: {str(e)}")
         return False
+
+def save_daily_news_digest(category: str, date: str, digest_text: str) -> bool:
+    """
+    Сохраняет дайджест новостей по категории и дате в коллекцию daily_news
+    """
+    try:
+        db.daily_news.update_one(
+            {"category": category, "date": date},
+            {"$set": {"category": category, "date": date, "digest": digest_text, "updated_at": datetime.utcnow()}},
+            upsert=True
+        )
+        logger.info(f"Дайджест сохранён: {category} {date}")
+        return True
+    except Exception as e:
+        logger.error(f"Ошибка при сохранении дайджеста: {str(e)}")
+        return False
+
+def get_daily_news_digest(category: str, date: str) -> str:
+    """
+    Получает дайджест новостей по категории и дате из коллекции daily_news
+    """
+    try:
+        doc = db.daily_news.find_one({"category": category, "date": date})
+        if doc:
+            return doc.get("digest", "")
+        return ""
+    except Exception as e:
+        logger.error(f"Ошибка при получении дайджеста: {str(e)}")
+        return ""

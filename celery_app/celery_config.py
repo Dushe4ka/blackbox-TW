@@ -29,9 +29,13 @@ worker_task_log_format = '[%(asctime)s: %(levelname)s/%(processName)s][%(task_na
 
 # Настройки расписания
 beat_schedule = {
+    'generate-daily-digests': {
+        'task': 'celery_app.tasks.news_tasks.generate_daily_digests',
+        'schedule': crontab(hour=16, minute=0),  # Каждый день в 13:00
+    },
     'send-daily-news': {
         'task': 'celery_app.tasks.news_tasks.send_daily_news',
-        'schedule': crontab(hour=14, minute=0),  # Каждую день в 14:00
+        'schedule': crontab(hour=16, minute=25),  # Каждый день в 14:00
     },
     'periodic-telegram-auth-check': {
         'task': 'celery_app.tasks.auth_TG.periodic_telegram_auth_check',
