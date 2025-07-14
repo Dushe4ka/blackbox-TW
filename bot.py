@@ -304,34 +304,34 @@ async def sources_upload_callback(callback_query: types.CallbackQuery):
 
 @dp.callback_query(lambda c: c.data == "sources_manage")
 async def sources_manage_callback(callback_query: types.CallbackQuery):
-    # Получаем все уникальные типы источников
+    # Получаем все уникальные категории источников
     sources = get_sources()
-    types_set = set(src.get('type', 'unknown') for src in sources)
-    type_buttons = [
-        [InlineKeyboardButton(text=type_name, callback_data=f"sources_manage_type_{type_name}")]
-        for type_name in sorted(types_set)
+    categories_set = set(src.get('category', 'Без категории') for src in sources)
+    category_buttons = [
+        [InlineKeyboardButton(text=cat_name, callback_data=f"sources_manage_category_{cat_name}")]
+        for cat_name in sorted(categories_set)
     ]
     # Кнопка для вывода всех источников
-    type_buttons.append([InlineKeyboardButton(text="Все", callback_data="sources_manage_type_all")])
+    category_buttons.append([InlineKeyboardButton(text="Все", callback_data="sources_manage_category_all")])
     # Кнопка назад
-    type_buttons.append([InlineKeyboardButton(text="← Назад", callback_data="menu_sources")])
+    category_buttons.append([InlineKeyboardButton(text="← Назад", callback_data="menu_sources")])
     await callback_query.message.edit_text(
-        "Выберите тип источников для просмотра:",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=type_buttons)
+        "Выберите категорию источников для просмотра:",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=category_buttons)
     )
 
-@dp.callback_query(lambda c: c.data.startswith("sources_manage_type_"))
-async def sources_manage_type_callback(callback_query: types.CallbackQuery):
-    type_filter = callback_query.data.replace("sources_manage_type_", "")
+@dp.callback_query(lambda c: c.data.startswith("sources_manage_category_"))
+async def sources_manage_category_callback(callback_query: types.CallbackQuery):
+    category_filter = callback_query.data.replace("sources_manage_category_", "")
     sources = get_sources()
-    if type_filter != "all":
-        sources = [src for src in sources if src.get('type') == type_filter]
+    if category_filter != "all":
+        sources = [src for src in sources if src.get('category') == category_filter]
     keyboard = create_sources_pagination_keyboard(sources, page=0)
     total_sources = len(sources)
     if total_sources == 0:
-        text = f"🗂 Активные источники (тип: {type_filter}):\n\n❌ Источники не найдены"
+        text = f"🗂 Активные источники (категория: {category_filter}):\n\n❌ Источники не найдены"
     else:
-        text = f"🗂 Активные источники (тип: {type_filter}):\n\n📊 Всего источников: {total_sources}\n📄 Страница 1"
+        text = f"🗂 Активные источники (категория: {category_filter}):\n\n📊 Всего источников: {total_sources}\n📄 Страница 1"
     await callback_query.message.edit_text(text, reply_markup=keyboard)
 
 @dp.callback_query(lambda c: c.data.startswith("delete_source_"))
