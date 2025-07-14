@@ -165,25 +165,23 @@ async def cmd_main_menu(message: types.Message):
     keyboard = get_main_menu_keyboard(is_admin=admin_status)
     await message.answer("Выберите задачу:", reply_markup=keyboard)
 
-@dp.message(Command("upload"))
-async def cmd_upload(message: types.Message, state: FSMContext):
-    await message.answer(
-        "📤 Отправьте CSV файл для загрузки в базу данных.\n"
-        "Файл должен содержать следующие колонки:\n"
-        "- url: ссылка на источник\n"
-        "- title: заголовок\n"
-        "- description: описание\n"
-        "- content: содержание\n"
-        "- date: дата (формат: ДД.ММ.ГГГГ)\n"
-        "- category: категория\n"
-        "- source_type: тип источника"
-    )
-    await state.set_state(CSVUpload.waiting_for_file)
-
 @dp.message(CSVUpload.waiting_for_file)
 async def process_csv_file(message: types.Message, state: FSMContext):
+    # Если пользователь отправил не файл, а текст "Назад" (например, с мобильной клавиатуры)
+    if message.text and message.text.strip() == "← Назад":
+        # Возврат к меню загрузки источников
+        await message.answer("Вы вернулись в меню загрузки источников.")
+        await state.clear()
+        return
     if not message.document or not message.document.file_name.endswith('.csv'):
-        await message.answer("❌ Пожалуйста, отправьте файл в формате CSV.")
+        await message.answer(
+            "❌ Пожалуйста, отправьте файл в формате CSV.",
+            reply_markup=InlineKeyboardMarkup(
+                inline_keyboard=[
+                    [InlineKeyboardButton(text="← Назад", callback_data="sources_upload")]
+                ]
+            )
+        )
         return
 
     file = await bot.get_file(message.document.file_id)
@@ -319,16 +317,25 @@ async def sources_manage_callback(callback_query: types.CallbackQuery):
 
 @dp.callback_query(lambda c: c.data.startswith("delete_source_"))
 async def delete_source_callback(callback_query: types.CallbackQuery):
-    # Парсим URL и номер страницы из callback_data
+    # Парсим индекс источника и номер страницы из callback_data
     parts = callback_query.data.replace("delete_source_", "").split("_")
     if len(parts) < 2:
         await callback_query.answer("❌ Ошибка при удалении", show_alert=True)
         return
     
-    # Последняя часть - номер страницы, остальное - URL
-    page = int(parts[-1])
-    url = "_".join(parts[:-1])  # Восстанавливаем URL (может содержать _)
-    
+    try:
+        source_idx = int(parts[0])
+        page = int(parts[1])
+    except ValueError:
+        await callback_query.answer("❌ Ошибка при удалении", show_alert=True)
+        return
+
+    sources = get_sources()
+    if source_idx >= len(sources):
+        await callback_query.answer("❌ Источник не найден", show_alert=True)
+        return
+
+    url = sources[source_idx].get('url')
     if delete_source(url):
         await callback_query.answer("✅ Источник удалён", show_alert=False)
     else:
@@ -448,7 +455,13 @@ async def toggle_subscription_callback(callback_query: types.CallbackQuery):
 @dp.callback_query(lambda c: c.data == "upload_csv")
 async def upload_csv_callback(callback_query: types.CallbackQuery, state: FSMContext):
     await callback_query.message.edit_text(
-        "📤 Пожалуйста, отправьте CSV-файл для массовой загрузки источников.")
+        "📤 Пожалуйста, отправьте CSV-файл для массовой загрузки источников.",
+        reply_markup=InlineKeyboardMarkup(
+            inline_keyboard=[
+                [InlineKeyboardButton(text="← Назад", callback_data="sources_upload")]
+            ]
+        )
+    )
     await state.set_state(CSVUpload.waiting_for_file)
 
 @dp.callback_query(lambda c: c.data == "upload_rss")
@@ -996,7 +1009,7 @@ def create_sources_pagination_keyboard(sources: List[Dict], page: int = 0, sourc
             ),
             InlineKeyboardButton(
                 text="❌", 
-                callback_data=f"delete_source_{source_url}_{page}"
+                callback_data=f"delete_source_{source_idx}_{page}"
             )
         ])
     
