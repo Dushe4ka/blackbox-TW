@@ -41,7 +41,10 @@ db.parsed_data.create_index("url", unique=True)
 db.parsed_data.create_index([("category", 1), ("date", -1)])
 
 # Создаем индексы для подписок
-db.subscriptions.create_index("user_id", unique=True)
+try:
+    db.subscriptions.create_index([("subscription_id", 1), ("subscription_type", 1)], unique=True)
+except Exception as e:
+    logger.warning(f"Индекс подписок не создан: {e}")
 
 # Создаем индексы для таблицы sources
 db.sources.create_index([("url", 1), ("type", 1)], unique=True)
@@ -147,60 +150,20 @@ def get_categories() -> List[str]:
         logger.error(f"Ошибка при получении категорий: {str(e)}")
         return []
 
-def get_user_subscription(user_id: int) -> Dict[str, Any]:
-    """
-    Получает настройки подписки пользователя
-    
-    Args:
-        user_id: ID пользователя
-        
-    Returns:
-        Dict[str, Any]: Настройки подписки
-    """
-    try:
-        subscription = db.subscriptions.find_one({"user_id": user_id})
-        if subscription:
-            return {
-                'enabled': subscription.get('enabled', False),
-                'categories': subscription.get('categories', [])
-            }
-        return {
-            'enabled': False,
-            'categories': []
-        }
-    except Exception as e:
-        logger.error(f"Ошибка при получении подписки пользователя {user_id}: {str(e)}")
-        return {
-            'enabled': False,
-            'categories': []
-        }
+def get_user_subscription(subscription_id, subscription_type):
+    """Получить подписку по id и типу ('user' или 'group')"""
+    sub = db.subscriptions.find_one({"subscription_id": subscription_id, "subscription_type": subscription_type})
+    if not sub:
+        return {"categories": []}
+    return sub
 
-def update_user_subscription(user_id: int, categories: List[str]) -> bool:
-    """
-    Обновляет настройки подписки пользователя
-    
-    Args:
-        user_id: ID пользователя
-        categories: Список категорий для подписки
-        
-    Returns:
-        bool: True если успешно, False если произошла ошибка
-    """
-    try:
-        db.subscriptions.update_one(
-            {"user_id": user_id},
-            {"$set": {
-                "user_id": user_id,
-                "enabled": True,
-                "categories": categories,
-                "updated_at": datetime.utcnow()
-            }},
-            upsert=True
-        )
-        return True
-    except Exception as e:
-        logger.error(f"Ошибка при обновлении подписки пользователя {user_id}: {str(e)}")
-        return False
+def update_user_subscription(subscription_id, subscription_type, categories):
+    """Обновить подписку по id и типу"""
+    db.subscriptions.update_one(
+        {"subscription_id": subscription_id, "subscription_type": subscription_type},
+        {"$set": {"categories": categories}},
+        upsert=True
+    )
 
 def toggle_subscription(user_id: str) -> bool:
     """
@@ -228,48 +191,21 @@ def toggle_subscription(user_id: str) -> bool:
         logger.error(f"Ошибка при переключении подписки пользователя {user_id}: {str(e)}")
         return False
 
-def get_subscribed_users() -> List[Dict[str, Any]]:
-    """
-    Получает список всех подписанных пользователей
-    
-    Returns:
-        List[Dict[str, Any]]: Список подписанных пользователей
-    """
-    try:
-        return list(db.subscriptions.find(
-            {"enabled": True},
-            {
-                "_id": 0,
-                "user_id": 1,
-                "categories": 1
-            }
-        ))
-    except Exception as e:
-        logger.error(f"Ошибка при получении списка подписчиков: {str(e)}")
-        return []
+def get_subscribed_users():
+    """Получить все подписки (и пользователей, и групп)"""
+    return list(db.subscriptions.find())
 
-def create_subscription(user_id: int, categories: List[str]) -> bool:
-    """
-    Создает новую подписку для пользователя
-    
-    Args:
-        user_id: ID пользователя
-        categories: Список категорий для подписки
-        
-    Returns:
-        bool: True если успешно, False если произошла ошибка
-    """
+def create_subscription(subscription_id, subscription_type, categories):
+    """Создать новую подписку по id и типу"""
     try:
         db.subscriptions.insert_one({
-            "user_id": user_id,
-            "enabled": True,
-            "categories": categories,
-            "created_at": datetime.utcnow(),
-            "updated_at": datetime.utcnow()
+            "subscription_id": subscription_id,
+            "subscription_type": subscription_type,
+            "categories": categories
         })
         return True
     except Exception as e:
-        logger.error(f"Ошибка при создании подписки пользователя {user_id}: {str(e)}")
+        logger.error(f"Ошибка при создании подписки: {str(e)}")
         return False 
 
 #---------------------------------------------------------------------------

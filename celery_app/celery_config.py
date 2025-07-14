@@ -35,7 +35,7 @@ beat_schedule = {
     },
     'send-daily-news': {
         'task': 'celery_app.tasks.news_tasks.send_daily_news',
-        'schedule': crontab(hour=16, minute=25),  # Каждый день в 14:00
+        'schedule': crontab(hour=18, minute=32),  # Каждый день в 14:00
     },
     'periodic-telegram-auth-check': {
         'task': 'celery_app.tasks.auth_TG.periodic_telegram_auth_check',

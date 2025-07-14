@@ -23,6 +23,13 @@ async def send_all_messages(bot, chat_id, message_parts):
             await asyncio.sleep(0.5)
     await bot.session.close()
 
+async def send_tg_message(token, chat_id, text):
+    bot = Bot(token=token)
+    try:
+        await bot.send_message(chat_id, text)
+    finally:
+        await bot.session.close()
+
 @app.task(bind=True, name='celery_app.tasks.news_tasks.analyze_news_task')
 def analyze_news_task(self, category: str, analysis_date: str, chat_id: int = None) -> dict:
     """
@@ -166,12 +173,13 @@ def send_daily_news(self):
             logger.info("Нет подписчиков для отправки новостей")
             return {'status': 'success', 'message': 'No subscribers found'}
         for subscriber in subscribers:
-            chat_id = subscriber['user_id']
+            subscription_id = subscriber['subscription_id']
+            subscription_type = subscriber.get('subscription_type', 'user')
             categories = subscriber.get('categories', [])
             if not categories:
-                logger.info(f"У подписчика {chat_id} нет выбранных категорий")
+                logger.info(f"У подписчика {subscription_id} нет выбранных категорий")
                 continue
-            logger.info(f"Рассылка подписчику {chat_id} по категориям: {categories}")
+            logger.info(f"Рассылка подписчику {subscription_id} (тип: {subscription_type}) по категориям: {categories}")
             for category in categories:
                 cat_digest = get_daily_news_digest(category, current_date)
                 if not cat_digest.strip():
@@ -179,15 +187,14 @@ def send_daily_news(self):
                 message_parts = split_digest_message(
                     digest_text=cat_digest,
                     date=current_date,
-                    total_materials=0  # Можно попытаться извлечь число материалов из cat_digest
+                    total_materials=0
                 )
-                try:
-                    bot = Bot(token=os.getenv("TELEGRAM_BOT_TOKEN"))
-                    for i, part in enumerate(message_parts):
-                        asyncio.run(send_all_messages(bot, chat_id, [format_message_part(part, i+1, len(message_parts))]))
-                    logger.info(f"Дайджест по категории {category} успешно отправлен подписчику {chat_id} ({len(message_parts)} частей)")
-                except Exception as e:
-                    logger.error(f"Ошибка при отправке дайджеста по категории {category} подписчику {chat_id}: {str(e)}")
+                for part in message_parts:
+                    try:
+                        asyncio.run(send_tg_message(os.getenv("TELEGRAM_BOT_TOKEN"), subscription_id, part))
+                        logger.info(f"Дайджест по категории {category} успешно отправлен подписчику {subscription_id} (тип: {subscription_type}) ({len(message_parts)} частей)")
+                    except Exception as e:
+                        logger.error(f"Ошибка при отправке дайджеста подписчику {subscription_id} (тип: {subscription_type}): {e}")
         execution_time = time.time() - start_time
         logger.info(f"=== Воркер {worker_num} (PID: {process_id}) завершил рассылку ежедневных новостей за {execution_time:.2f} секунд ===")
         return {'status': 'success', 'subscribers_count': len(subscribers)}

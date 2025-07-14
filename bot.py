@@ -208,27 +208,42 @@ async def process_csv_file(message: types.Message, state: FSMContext):
         os.remove(temp_file)
     await state.clear()
 
-@dp.message(Command("subscribe"))
-async def cmd_subscribe(message: types.Message, state: FSMContext):
-    """Обработчик команды подписки на ежедневные новости"""
-    # Получаем список категорий
-    categories = vector_store.get_categories()
-    
-    if not categories:
-        await message.answer("❌ Нет доступных категорий для подписки")
-        return
-    
-    # Создаем клавиатуру с категориями
-    keyboard = types.ReplyKeyboardMarkup(
-        keyboard=[[types.KeyboardButton(text=category)] for category in categories],
-        resize_keyboard=True
-    )
-    
-    await message.answer(
-        "📊 Выберите категории для подписки на ежедневные новости:",
-        reply_markup=keyboard
-    )
-    await state.set_state(SubscriptionStates.waiting_for_category)
+@dp.my_chat_member()
+async def on_bot_added_to_group(event: types.ChatMemberUpdated):
+    if event.new_chat_member.status in ("member", "administrator") and event.old_chat_member.status == "left":
+        chat_id = event.chat.id
+        text = (
+            "👋 Привет! Я бот для анализа трендов в различных категориях.\n\n"
+            "Теперь я в этой группе и могу присылать ежедневные новости по подписке.\n"
+            "\n📊 Что я умею:\n"
+            "• Формирую ежедневные и еженедельные дайджесты новостей по выбранным категориям\n"
+            "• Анализирую тренды по вашему запросу\n"
+            "• Помогаю отслеживать важные изменения в интересующих вас сферах\n\n"
+            "Чтобы подписаться на новости для всей группы, используйте меню подписки.\n"
+            "\n❗️Ежедневные новости по подписке приходят в 14:00!❗️"
+        )
+        await bot.send_message(chat_id, text)
+
+def get_subscription_id_and_type(obj):
+    # Для callback_query
+    if hasattr(obj, 'from_user'):
+        user_id = obj.from_user.id
+    elif hasattr(obj, 'from_user_id'):
+        user_id = obj.from_user_id
+    else:
+        user_id = None
+    # Для групп
+    if hasattr(obj, 'chat') and getattr(obj.chat, 'type', None) in ["group", "supergroup"]:
+        return obj.chat.id, "group"
+    # Для личных чатов (private)
+    elif hasattr(obj, 'chat') and getattr(obj.chat, 'type', None) == "private":
+        return user_id, "user"
+    # Fallback (например, если только user_id)
+    elif user_id is not None:
+        return user_id, "user"
+    else:
+        raise Exception("Не удалось определить user_id для подписки")
+
 
 @dp.message(SubscriptionStates.waiting_for_category)
 async def process_subscription_category(message: types.Message, state: FSMContext):
@@ -236,7 +251,8 @@ async def process_subscription_category(message: types.Message, state: FSMContex
     category = message.text
     
     # Проверяем существующую подписку
-    subscription = get_user_subscription(message.chat.id)
+    subscription_id, subscription_type = get_subscription_id_and_type(message)
+    subscription = get_user_subscription(subscription_id, subscription_type)
     
     if subscription:
         # Обновляем существующую подписку
@@ -248,10 +264,10 @@ async def process_subscription_category(message: types.Message, state: FSMContex
             categories.append(category)
             await message.answer(f"✅ Подписались на категорию: {category}")
         
-        update_user_subscription(message.chat.id, categories)
+        update_user_subscription(subscription_id, subscription_type, categories)
     else:
         # Создаем новую подписку с начальной категорией
-        if create_subscription(message.chat.id, [category]):
+        if create_subscription(subscription_id, subscription_type, [category]):
             await message.answer(f"✅ Подписались на категорию: {category}")
         else:
             await message.answer("❌ Произошла ошибка при создании подписки")
@@ -425,11 +441,11 @@ async def menu_analysis_callback(callback_query: types.CallbackQuery):
 
 @dp.callback_query(lambda c: c.data == "menu_subscription")
 async def menu_subscription_callback(callback_query: types.CallbackQuery):
-    user_id = callback_query.from_user.id
+    subscription_id, subscription_type = get_subscription_id_and_type(callback_query)
     # Получаем все категории динамически
     categories = get_categories()
     # Получаем подписки пользователя из БД
-    user_subs = get_user_subscription(user_id)["categories"]
+    user_subs = get_user_subscription(subscription_id, subscription_type)["categories"]
     keyboard = InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(
@@ -445,17 +461,17 @@ async def menu_subscription_callback(callback_query: types.CallbackQuery):
 
 @dp.callback_query(lambda c: c.data.startswith("toggle_sub_"))
 async def toggle_subscription_callback(callback_query: types.CallbackQuery):
-    user_id = callback_query.from_user.id
+    subscription_id, subscription_type = get_subscription_id_and_type(callback_query)
     cat = callback_query.data.replace("toggle_sub_", "")
     # Получаем текущие категории пользователя
-    user_subs = get_user_subscription(user_id)["categories"]
+    user_subs = get_user_subscription(subscription_id, subscription_type)["categories"]
     # Добавляем или убираем категорию
     if cat in user_subs:
         user_subs.remove(cat)
     else:
         user_subs.append(cat)
     # Обновляем в БД
-    update_user_subscription(user_id, user_subs)
+    update_user_subscription(subscription_id, subscription_type, user_subs)
     # Получаем все категории динамически
     categories = get_categories()
     keyboard = InlineKeyboardMarkup(
