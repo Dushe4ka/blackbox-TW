@@ -36,6 +36,8 @@ from celery_app.tasks.news_tasks import analyze_news_task
 from csv_sources_reader import process_csv as process_csv_sources
 import redis
 import json
+import urllib.parse
+import hashlib
 
 from celery_app.tasks.parse_embed_data import parse_and_vectorize_sources
 from celery_app.tasks.auth_TG import periodic_telegram_auth_check, check_telegram_auth_status, process_auth_code
@@ -318,18 +320,29 @@ async def sources_upload_callback(callback_query: types.CallbackQuery):
         reply_markup=keyboard
     )
 
+def category_to_callback(category: str) -> str:
+    if category == "all":
+        return "all"
+    return hashlib.md5(category.encode('utf-8')).hexdigest()[:16]
+
+def callback_to_category(callback: str, all_categories: list) -> str:
+    if callback == "all":
+        return "all"
+    for cat in all_categories:
+        if category_to_callback(cat) == callback:
+            return cat
+    return None
+
+# --- Везде, где формируется callback_data для категорий ---
 @dp.callback_query(lambda c: c.data == "sources_manage")
 async def sources_manage_callback(callback_query: types.CallbackQuery):
-    # Получаем все уникальные категории источников
     sources = get_sources()
     categories_set = set(src.get('category', 'Без категории') for src in sources)
     category_buttons = [
-        [InlineKeyboardButton(text=cat_name, callback_data=f"sources_manage_category_{cat_name}")]
+        [InlineKeyboardButton(text=cat_name, callback_data=f"sources_manage_category_{category_to_callback(cat_name)}")]
         for cat_name in sorted(categories_set)
     ]
-    # Кнопка для вывода всех источников
     category_buttons.append([InlineKeyboardButton(text="Все", callback_data="sources_manage_category_all")])
-    # Кнопка назад
     category_buttons.append([InlineKeyboardButton(text="← Назад", callback_data="menu_sources")])
     await callback_query.message.edit_text(
         "Выберите категорию источников для просмотра:",
@@ -338,12 +351,13 @@ async def sources_manage_callback(callback_query: types.CallbackQuery):
 
 @dp.callback_query(lambda c: c.data.startswith("sources_manage_category_"))
 async def sources_manage_category_callback(callback_query: types.CallbackQuery):
-    category_filter = callback_query.data.replace("sources_manage_category_", "")
+    category_hash = callback_query.data.replace("sources_manage_category_", "")
     sources = get_sources()
-    if category_filter != "all":
-        sources = [src for src in sources if src.get('category') == category_filter]
-    keyboard = create_sources_pagination_keyboard(sources, page=0)
-    total_sources = len(sources)
+    categories_set = set(src.get('category', 'Без категории') for src in sources)
+    category_filter = callback_to_category(category_hash, list(categories_set))
+    filtered_sources = sources if category_filter == "all" else [src for src in sources if src.get('category') == category_filter]
+    keyboard = create_sources_pagination_keyboard(filtered_sources, category_filter, page=0)
+    total_sources = len(filtered_sources)
     if total_sources == 0:
         text = f"🗂 Активные источники (категория: {category_filter}):\n\n❌ Источники не найдены"
     else:
@@ -352,72 +366,84 @@ async def sources_manage_category_callback(callback_query: types.CallbackQuery):
 
 @dp.callback_query(lambda c: c.data.startswith("delete_source_"))
 async def delete_source_callback(callback_query: types.CallbackQuery):
-    # Парсим индекс источника и номер страницы из callback_data
-    parts = callback_query.data.replace("delete_source_", "").split("_")
-    if len(parts) < 2:
+    # delete_source_{category_hash}_{source_idx}_{page}
+    parts = callback_query.data.replace("delete_source_", "").split("_", 2)
+    if len(parts) < 3:
         await callback_query.answer("❌ Ошибка при удалении", show_alert=True)
         return
-    
     try:
-        source_idx = int(parts[0])
-        page = int(parts[1])
-    except ValueError:
+        category_hash = parts[0]
+        source_idx = int(parts[1])
+        page = int(parts[2])
+    except Exception:
         await callback_query.answer("❌ Ошибка при удалении", show_alert=True)
         return
-
     sources = get_sources()
-    if source_idx >= len(sources):
+    categories_set = set(src.get('category', 'Без категории') for src in sources)
+    category_filter = callback_to_category(category_hash, list(categories_set))
+    filtered_sources = sources if category_filter == "all" else [src for src in sources if src.get('category') == category_filter]
+    if source_idx >= len(filtered_sources):
         await callback_query.answer("❌ Источник не найден", show_alert=True)
         return
-
-    url = sources[source_idx].get('url')
+    url = filtered_sources[source_idx].get('url')
     if delete_source(url):
         await callback_query.answer("✅ Источник удалён", show_alert=False)
     else:
         await callback_query.answer("❌ Ошибка при удалении", show_alert=True)
         return
-    
     # Обновляем список, оставаясь на той же странице
     try:
         sources = get_sources()
-        total_sources = len(sources)
-        total_pages = (total_sources + 9) // 10  # 10 источников на страницу
-        
-        # Если текущая страница стала больше общего количества страниц, переходим на последнюю
+        categories_set = set(src.get('category', 'Без категории') for src in sources)
+        category_filter = callback_to_category(category_hash, list(categories_set))
+        filtered_sources = sources if category_filter == "all" else [src for src in sources if src.get('category') == category_filter]
+        total_sources = len(filtered_sources)
+        sources_per_page = 10
+        total_pages = (total_sources + sources_per_page - 1) // sources_per_page
         if page >= total_pages and total_pages > 0:
             page = total_pages - 1
-        
-        keyboard = create_sources_pagination_keyboard(sources, page=page)
-        
+        keyboard = create_sources_pagination_keyboard(filtered_sources, category_filter, page=page)
         if total_sources == 0:
-            text = "🗂 Активные источники:\n\n❌ Источники не найдены"
+            text = f"🗂 Активные источники (категория: {category_filter}):\n\n❌ Источники не найдены"
         else:
-            text = f"🗂 Активные источники:\n\n📊 Всего источников: {total_sources}\n📄 Страница {page+1} из {total_pages}"
-        
+            text = f"🗂 Активные источники (категория: {category_filter}):\n\n📊 Всего источников: {total_sources}\n📄 Страница {page+1} из {total_pages}"
         await callback_query.message.edit_text(text, reply_markup=keyboard)
     except Exception as e:
-        # В случае ошибки возвращаемся к первой странице
-        await sources_manage_callback(callback_query)
+        await sources_manage_category_callback(callback_query)
 
 @dp.callback_query(lambda c: c.data.startswith("sources_page_"))
 async def sources_page_callback(callback_query: types.CallbackQuery):
-    """Обработчик навигации по страницам источников"""
+    # sources_page_{category_hash}_{page}
     try:
-        page = int(callback_query.data.replace("sources_page_", ""))
+        parts = callback_query.data.replace("sources_page_", "").split("_", 1)
+        category_hash = parts[0]
+        page = int(parts[1])
         sources = get_sources()
-        keyboard = create_sources_pagination_keyboard(sources, page=page)
-        
-        total_sources = len(sources)
-        total_pages = (total_sources + 9) // 10  # 10 источников на страницу
-        
+        categories_set = set(src.get('category', 'Без категории') for src in sources)
+        category_filter = callback_to_category(category_hash, list(categories_set))
+        filtered_sources = sources if category_filter == "all" else [src for src in sources if src.get('category') == category_filter]
+        keyboard = create_sources_pagination_keyboard(filtered_sources, category_filter, page=page)
+        total_sources = len(filtered_sources)
+        sources_per_page = 10
+        total_pages = (total_sources + sources_per_page - 1) // sources_per_page
         if total_sources == 0:
-            text = "🗂 Активные источники:\n\n❌ Источники не найдены"
+            text = f"🗂 Активные источники (категория: {category_filter}):\n\n❌ Источники не найдены"
         else:
-            text = f"🗂 Активные источники:\n\n📊 Всего источников: {total_sources}\n📄 Страница {page+1} из {total_pages}"
-        
+            text = f"🗂 Активные источники (категория: {category_filter}):\n\n📊 Всего источников: {total_sources}\n📄 Страница {page+1} из {total_pages}"
         await callback_query.message.edit_text(text, reply_markup=keyboard)
-    except ValueError:
+    except Exception:
         await callback_query.answer("❌ Ошибка при переходе на страницу")
+
+@dp.callback_query(lambda c: c.data == "sources_manage_category_all")
+async def sources_manage_all_category_callback(callback_query: types.CallbackQuery):
+    sources = get_sources()
+    keyboard = create_sources_pagination_keyboard(sources, category_filter="all", page=0)
+    total_sources = len(sources)
+    if total_sources == 0:
+        text = "🗂 Активные источники:\n\n❌ Источники не найдены"
+    else:
+        text = f"🗂 Активные источники:\n\n📊 Всего источников: {total_sources}\n📄 Страница 1"
+    await callback_query.message.edit_text(text, reply_markup=keyboard)
 
 @dp.callback_query(lambda c: c.data.startswith("noop_"))
 async def noop_callback(callback_query: types.CallbackQuery):
@@ -504,7 +530,7 @@ async def upload_rss_callback(callback_query: types.CallbackQuery, state: FSMCon
     categories = vector_store.get_categories()
     keyboard = InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text=cat, callback_data=f"rss_cat_{cat}")] for cat in categories
+            [InlineKeyboardButton(text=cat, callback_data=f"rss_cat_{urllib.parse.quote(cat)}")] for cat in categories
         ] + [
             [InlineKeyboardButton(text="Своя категория", callback_data="rss_cat_custom")],
             [InlineKeyboardButton(text="← Назад", callback_data="sources_upload")]
@@ -517,6 +543,7 @@ async def upload_rss_callback(callback_query: types.CallbackQuery, state: FSMCon
 @dp.callback_query(lambda c: c.data.startswith("rss_cat_"))
 async def rss_category_chosen(callback_query: types.CallbackQuery, state: FSMContext):
     cat = callback_query.data.replace("rss_cat_", "")
+    cat = urllib.parse.unquote(cat)
     if cat == "custom":
         await callback_query.message.edit_text(
             "Введите свою категорию:",
@@ -578,7 +605,7 @@ async def upload_tg_callback(callback_query: types.CallbackQuery, state: FSMCont
     categories = vector_store.get_categories()
     keyboard = InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text=cat, callback_data=f"tg_cat_{cat}")] for cat in categories
+            [InlineKeyboardButton(text=cat, callback_data=f"tg_cat_{urllib.parse.quote(cat)}")] for cat in categories
         ] + [
             [InlineKeyboardButton(text="Своя категория", callback_data="tg_cat_custom")],
             [InlineKeyboardButton(text="← Назад", callback_data="sources_upload")]
@@ -591,6 +618,7 @@ async def upload_tg_callback(callback_query: types.CallbackQuery, state: FSMCont
 @dp.callback_query(lambda c: c.data.startswith("tg_cat_"))
 async def tg_category_chosen(callback_query: types.CallbackQuery, state: FSMContext):
     cat = callback_query.data.replace("tg_cat_", "")
+    cat = urllib.parse.unquote(cat)
     if cat == "custom":
         await callback_query.message.edit_text(
             "Введите свою категорию:",
@@ -849,7 +877,7 @@ async def analysis_digest_menu_callback(callback_query: types.CallbackQuery):
 async def analysis_query_category_callback(callback_query: types.CallbackQuery, state: FSMContext):
     categories = VectorStore().get_categories()
     keyboard = InlineKeyboardMarkup(
-        inline_keyboard=[[InlineKeyboardButton(text=cat, callback_data=f"analysis_query_cat_{cat}")] for cat in categories] +
+        inline_keyboard=[[InlineKeyboardButton(text=cat, callback_data=f"analysis_query_cat_{urllib.parse.quote(cat)}")] for cat in categories] +
         [[InlineKeyboardButton(text="← Назад", callback_data="menu_analysis")]]
     )
     await callback_query.message.edit_text(
@@ -861,6 +889,7 @@ async def analysis_query_category_callback(callback_query: types.CallbackQuery, 
 @dp.callback_query(lambda c: c.data.startswith("analysis_query_cat_"))
 async def analysis_query_input_callback(callback_query: types.CallbackQuery, state: FSMContext):
     category = callback_query.data.replace("analysis_query_cat_", "")
+    category = urllib.parse.unquote(category)
     await state.update_data(category=category)
     await callback_query.message.edit_text(
         f"Вы выбрали категорию: {category}\nВведите ваш запрос:",
@@ -881,7 +910,7 @@ async def analysis_query_run(message: types.Message, state: FSMContext):
 async def analysis_daily_category_callback(callback_query: types.CallbackQuery, state: FSMContext):
     categories = VectorStore().get_categories()
     keyboard = InlineKeyboardMarkup(
-        inline_keyboard=[[InlineKeyboardButton(text=cat, callback_data=f"analysis_daily_cat_{cat}")] for cat in categories] +
+        inline_keyboard=[[InlineKeyboardButton(text=cat, callback_data=f"analysis_daily_cat_{urllib.parse.quote(cat)}")] for cat in categories] +
         [[InlineKeyboardButton(text="← Назад", callback_data="analysis_digest_menu")]]
     )
     await callback_query.message.edit_text(
@@ -893,6 +922,7 @@ async def analysis_daily_category_callback(callback_query: types.CallbackQuery, 
 @dp.callback_query(lambda c: c.data.startswith("analysis_daily_cat_"))
 async def analysis_daily_date_input_callback(callback_query: types.CallbackQuery, state: FSMContext):
     category = callback_query.data.replace("analysis_daily_cat_", "")
+    category = urllib.parse.unquote(category)
     await state.update_data(category=category)
     await callback_query.message.edit_text(
         f"Вы выбрали категорию: {category}\nВыберите дату:",
@@ -915,7 +945,7 @@ async def process_daily_calendar(callback_query: types.CallbackQuery, callback_d
 async def analysis_weekly_category_callback(callback_query: types.CallbackQuery, state: FSMContext):
     categories = VectorStore().get_categories()
     keyboard = InlineKeyboardMarkup(
-        inline_keyboard=[[InlineKeyboardButton(text=cat, callback_data=f"analysis_weekly_cat_{cat}")] for cat in categories] +
+        inline_keyboard=[[InlineKeyboardButton(text=cat, callback_data=f"analysis_weekly_cat_{urllib.parse.quote(cat)}")] for cat in categories] +
         [[InlineKeyboardButton(text="← Назад", callback_data="analysis_digest_menu")]]
     )
     await callback_query.message.edit_text(
@@ -927,6 +957,7 @@ async def analysis_weekly_category_callback(callback_query: types.CallbackQuery,
 @dp.callback_query(lambda c: c.data.startswith("analysis_weekly_cat_"))
 async def analysis_weekly_date_input_callback(callback_query: types.CallbackQuery, state: FSMContext):
     category = callback_query.data.replace("analysis_weekly_cat_", "")
+    category = urllib.parse.unquote(category)
     await state.update_data(category=category)
     await callback_query.message.edit_text(
         f"Вы выбрали категорию: {category}\nВыберите начальную дату недели:",
@@ -1010,7 +1041,7 @@ def get_add_more_sources_keyboard(source_type: str):
         ]
     )
 
-def create_sources_pagination_keyboard(sources: List[Dict], page: int = 0, sources_per_page: int = 10):
+def create_sources_pagination_keyboard(sources: List[Dict], category_filter: str = "all", page: int = 0, sources_per_page: int = 10):
     """Создает клавиатуру с пагинацией для управления источниками"""
     total_sources = len(sources)
     total_pages = (total_sources + sources_per_page - 1) // sources_per_page
@@ -1040,11 +1071,11 @@ def create_sources_pagination_keyboard(sources: List[Dict], page: int = 0, sourc
         keyboard_rows.append([
             InlineKeyboardButton(
                 text=f"{source_type}: {display_url}", 
-                callback_data=f"noop_{source_idx}"
+                callback_data=f"noop_{category_to_callback(category_filter)}_{source_idx}_{page}"
             ),
             InlineKeyboardButton(
                 text="❌", 
-                callback_data=f"delete_source_{source_idx}_{page}"
+                callback_data=f"delete_source_{category_to_callback(category_filter)}_{source_idx}_{page}"
             )
         ])
     
@@ -1053,7 +1084,7 @@ def create_sources_pagination_keyboard(sources: List[Dict], page: int = 0, sourc
     
     # Кнопка "Предыдущая страница"
     if page > 0:
-        nav_buttons.append(InlineKeyboardButton(text="◀️", callback_data=f"sources_page_{page-1}"))
+        nav_buttons.append(InlineKeyboardButton(text="◀️", callback_data=f"sources_page_{category_to_callback(category_filter)}_{page-1}"))
     
     # Информация о странице
     nav_buttons.append(InlineKeyboardButton(
@@ -1063,7 +1094,7 @@ def create_sources_pagination_keyboard(sources: List[Dict], page: int = 0, sourc
     
     # Кнопка "Следующая страница"
     if page < total_pages - 1:
-        nav_buttons.append(InlineKeyboardButton(text="▶️", callback_data=f"sources_page_{page+1}"))
+        nav_buttons.append(InlineKeyboardButton(text="▶️", callback_data=f"sources_page_{category_to_callback(category_filter)}_{page+1}"))
     
     if nav_buttons:
         keyboard_rows.append(nav_buttons)
