@@ -527,7 +527,7 @@ async def upload_csv_callback(callback_query: types.CallbackQuery, state: FSMCon
 
 @dp.callback_query(lambda c: c.data == "upload_rss")
 async def upload_rss_callback(callback_query: types.CallbackQuery, state: FSMContext):
-    categories = vector_store.get_categories()
+    categories = get_categories()
     keyboard = InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text=cat, callback_data=f"rss_cat_{urllib.parse.quote(cat)}")] for cat in categories
@@ -602,7 +602,7 @@ async def process_rss_link(message: types.Message, state: FSMContext):
 
 @dp.callback_query(lambda c: c.data == "upload_tg")
 async def upload_tg_callback(callback_query: types.CallbackQuery, state: FSMContext):
-    categories = vector_store.get_categories()
+    categories = get_categories()
     keyboard = InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text=cat, callback_data=f"tg_cat_{urllib.parse.quote(cat)}")] for cat in categories
