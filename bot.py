@@ -875,7 +875,7 @@ async def analysis_digest_menu_callback(callback_query: types.CallbackQuery):
 # Анализ по запросу: выбор категории через кнопки, затем ввод запроса
 @dp.callback_query(lambda c: c.data == "analysis_query")
 async def analysis_query_category_callback(callback_query: types.CallbackQuery, state: FSMContext):
-    categories = VectorStore().get_categories()
+    categories = get_categories() # VectorStore().get_categories()
     keyboard = InlineKeyboardMarkup(
         inline_keyboard=[[InlineKeyboardButton(text=cat, callback_data=f"analysis_query_cat_{category_to_callback(cat)}")]
                          for cat in categories] +
@@ -890,7 +890,7 @@ async def analysis_query_category_callback(callback_query: types.CallbackQuery, 
 @dp.callback_query(lambda c: c.data.startswith("analysis_query_cat_"))
 async def analysis_query_input_callback(callback_query: types.CallbackQuery, state: FSMContext):
     category_hash = callback_query.data.replace("analysis_query_cat_", "")
-    categories = VectorStore().get_categories()
+    categories = get_categories() #VectorStore().get_categories()
     category = callback_to_category(category_hash, categories)
     await state.update_data(category=category)
     await callback_query.message.edit_text(
@@ -910,7 +910,7 @@ async def analysis_query_run(message: types.Message, state: FSMContext):
 # Ежедневный дайджест: выбор категории и даты
 @dp.callback_query(lambda c: c.data == "analysis_daily")
 async def analysis_daily_category_callback(callback_query: types.CallbackQuery, state: FSMContext):
-    categories = VectorStore().get_categories()
+    categories = get_categories() # VectorStore().get_categories()
     keyboard = InlineKeyboardMarkup(
         inline_keyboard=[[InlineKeyboardButton(text=cat, callback_data=f"analysis_daily_cat_{category_to_callback(cat)}")]
                          for cat in categories] +
@@ -925,7 +925,7 @@ async def analysis_daily_category_callback(callback_query: types.CallbackQuery, 
 @dp.callback_query(lambda c: c.data.startswith("analysis_daily_cat_"))
 async def analysis_daily_date_input_callback(callback_query: types.CallbackQuery, state: FSMContext):
     category_hash = callback_query.data.replace("analysis_daily_cat_", "")
-    categories = VectorStore().get_categories()
+    categories = get_categories() # VectorStore().get_categories()
     category = callback_to_category(category_hash, categories)
     await state.update_data(category=category)
     await callback_query.message.edit_text(
@@ -948,7 +948,7 @@ async def process_daily_calendar(callback_query: types.CallbackQuery, callback_d
 # Еженедельный дайджест: выбор категории и даты
 @dp.callback_query(lambda c: c.data == "analysis_weekly")
 async def analysis_weekly_category_callback(callback_query: types.CallbackQuery, state: FSMContext):
-    categories = VectorStore().get_categories()
+    categories = get_categories() # VectorStore().get_categories()
     keyboard = InlineKeyboardMarkup(
         inline_keyboard=[[InlineKeyboardButton(text=cat, callback_data=f"analysis_weekly_cat_{category_to_callback(cat)}")]
                          for cat in categories] +
@@ -963,7 +963,7 @@ async def analysis_weekly_category_callback(callback_query: types.CallbackQuery,
 @dp.callback_query(lambda c: c.data.startswith("analysis_weekly_cat_"))
 async def analysis_weekly_date_input_callback(callback_query: types.CallbackQuery, state: FSMContext):
     category_hash = callback_query.data.replace("analysis_weekly_cat_", "")
-    categories = VectorStore().get_categories()
+    categories = get_categories() # VectorStore().get_categories()
     category = callback_to_category(category_hash, categories)
     await state.update_data(category=category)
     await callback_query.message.edit_text(
